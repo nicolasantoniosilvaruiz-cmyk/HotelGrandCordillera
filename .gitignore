@@ -1,0 +1,45 @@
+# Entorno virtual
+.venv/
+venv/
+ENV/
+
+# Archivos de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Variables de entorno y configuraciones locales
+.env
+.env.local
+.env.*.local
+
+# Archivos de IDEs y editores
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archivos de caché de Django y logs
+*.log
+local_settings.py
+media/
+staticfiles/
