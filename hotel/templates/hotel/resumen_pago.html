@@ -1,0 +1,12 @@
+{% load static %}
+<aside class="stay-summary checkout-summary"><h2>Tu estadía, en detalle</h2>
+  <img src="{% static 'hotel/img/habitacion-sur.webp' %}" alt="Ambientación ilustrativa de habitación">
+  <h3>Habitación {{ reserva.habitacion.get_tipo_display }}</h3>
+  <p>{{ reserva.numero_huespedes }} huésped{{ reserva.numero_huespedes|pluralize:' ,es' }} · {{ noches }} noche{{ noches|pluralize }}<br>{{ reserva.fecha_entrada|date:'j M Y' }} → {{ reserva.fecha_salida|date:'j M Y' }}<br>Entrada {{ reserva.fecha_entrada|date:'H:i' }} h · Salida {{ reserva.fecha_salida|date:'H:i' }} h</p>
+  <div class="summary-lines"><div><span>Alojamiento · {{ noches }} × ${{ reserva.precio_noche_pactado|floatformat:'-2g' }}</span><strong>${{ alojamiento|floatformat:'-2g' }}</strong></div>
+  {% for detalle in detalles %}<div><span>{{ detalle.servicio.nombre }} × {{ detalle.cantidad }}</span><strong>${{ detalle.subtotal|floatformat:'-2g' }}</strong></div>{% endfor %}
+  <div class="summary-subtotal"><span>Subtotal</span><strong>${{ subtotal|floatformat:'-2g' }}</strong></div>
+  {% if reserva.descuento_aplicado %}<div class="discount-line"><span>Bienvenida · 5% en alojamiento</span><strong>−${{ reserva.descuento_aplicado|floatformat:'-2g' }}</strong></div>{% endif %}</div>
+  <div class="summary-total"><strong>Total CLP</strong><strong>${{ reserva.monto_total|floatformat:'-2g' }}</strong></div>
+  <p class="price-caption">Los extras mantienen su precio. Sin cargos reales en esta demostración.</p>
+</aside>

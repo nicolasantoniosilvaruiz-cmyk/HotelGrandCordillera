@@ -1,0 +1,27 @@
+{% extends 'hotel/base.html' %}{% load static l10n %}
+{% block title %}Habitaciones disponibles · Grand Cordillera{% endblock %}
+{% block content %}
+{% include 'hotel/pasos.html' %}
+<section class="booking-page"><div class="container">
+  <header class="booking-heading"><span class="eyebrow">TU ESTADÍA A MEDIDA</span><h1>Elige tu refugio.</h1><p>Selecciona tu habitación y suma los extras que más disfrutas.</p></header>
+  <div class="search-summary"><p><svg class="icon"><use href="#bell"/></svg>{{ datos.entrada|date:'j M Y' }} → {{ datos.salida|date:'j M Y' }} <span>·</span>{{ noches }} noche{{ noches|pluralize }} <span>·</span>{{ datos.huespedes }} adulto{{ datos.huespedes|pluralize }} <span>·</span>1 habitación</p><a class="outline-button" href="{% url 'hotel:fechas' %}?{{ query }}">Modificar búsqueda</a></div>
+  {% if habitaciones %}
+  <form class="rooms-layout" action="{% url 'hotel:seleccionar' %}" method="post" id="seleccion-habitacion" data-noches="{{ noches }}">
+    {% csrf_token %}<input type="hidden" name="entrada" value="{{ datos.entrada|date:'Y-m-d' }}"><input type="hidden" name="salida" value="{{ datos.salida|date:'Y-m-d' }}"><input type="hidden" name="huespedes" value="{{ datos.huespedes }}">
+    <div class="room-options"><div class="options-caption"><strong>{% if habitaciones|length == 1 %}1 habitación disponible{% else %}{{ habitaciones|length }} habitaciones disponibles{% endif %} para tus fechas</strong><span>Tarifa por habitación / noche</span></div>
+      {% for habitacion in habitaciones %}
+      <label class="room-option {% if habitacion.pk == seleccionada.pk %}selected{% endif %}">
+        <input type="radio" name="habitacion" value="{{ habitacion.pk }}" data-precio="{{ habitacion.precio_base_noche|unlocalize }}" data-nombre="{{ habitacion.get_tipo_display }} · Nº {{ habitacion.numero }}" {% if habitacion.pk == seleccionada.pk %}checked{% endif %} required>
+        <img src="{% static 'hotel/img/habitacion-sur.webp' %}" alt="Ambientación ilustrativa de una habitación del sur de Chile" class="room-option-image room-image-{{ habitacion.tipo|lower }}">
+        <div class="room-option-copy"><h2>{{ habitacion.get_tipo_display }}</h2><p>Habitación {{ habitacion.numero }} · Un espacio para descansar</p><p>Consulta con recepción la capacidad y los servicios incluidos.</p><strong class="night-price">${{ habitacion.precio_base_noche|floatformat:'0g' }} <span>/ noche</span></strong><span class="price-caption">CLP · Sin extras</span></div><span class="choice-dot" aria-hidden="true"></span><span class="select-label">{% if habitacion.pk == seleccionada.pk %}✓ Seleccionada{% else %}Seleccionar{% endif %}</span>
+      </label>{% endfor %}
+      <section class="extras-section"><h2>Pequeños extras, una gran estadía.</h2><p>Agrega las unidades que deseas contratar. Los precios se suman al alojamiento.</p>
+        {% for servicio in servicios %}<div class="extra-option"><div><label for="extra_{{ servicio.pk }}">{{ servicio.nombre }}</label><p>${{ servicio.precio|floatformat:'0g' }} por unidad</p></div><label class="quantity-label" for="extra_{{ servicio.pk }}">Cantidad<input id="extra_{{ servicio.pk }}" name="extra_{{ servicio.pk }}" type="number" value="0" min="0" max="99" step="1" data-extra data-id="{{ servicio.pk }}" data-precio="{{ servicio.precio|unlocalize }}" data-nombre="{{ servicio.nombre }}"></label></div>{% empty %}<p class="no-extras">Por ahora no hay servicios adicionales disponibles.</p>{% endfor %}
+      </section><p class="illustration-note">Imágenes de ambientación ilustrativas. Las características se confirman con recepción.</p>
+    </div>
+    <aside class="stay-summary"><h2>Tu estadía, en detalle</h2><img src="{% static 'hotel/img/habitacion-sur.webp' %}" alt="Ambientación ilustrativa de habitación"><h3 id="resumen-habitacion">{{ seleccionada.get_tipo_display }} · Nº {{ seleccionada.numero }}</h3><p>{{ datos.huespedes }} adulto{{ datos.huespedes|pluralize }} · {{ noches }} noche{{ noches|pluralize }}<br>{{ datos.entrada|date:'j M Y' }} → {{ datos.salida|date:'j M Y' }}</p><div class="summary-lines"><div><span>Alojamiento · {{ noches }} noche{{ noches|pluralize }}</span><strong id="resumen-alojamiento">—</strong></div><div id="resumen-extras"></div></div><div class="summary-total" aria-live="polite"><strong>Total CLP</strong><strong id="resumen-total">—</strong></div><p class="price-caption">El total incluye los extras seleccionados.</p><button type="submit" class="button">Continuar <svg class="icon"><use href="#arrow"/></svg></button><p class="selection-note">Elegir una habitación no confirma ni bloquea la reserva.</p></aside>
+    {{ extras_guardados|json_script:'extras-guardados' }}
+  </form>
+  {% else %}<div class="empty-state"><svg class="icon"><use href="#mountain"/></svg><h2>No hay habitaciones disponibles para esas fechas.</h2><p>Prueba con otras fechas para encontrar tu próxima escapada.</p><a class="button" href="{% url 'hotel:fechas' %}?{{ query }}">Cambiar fechas</a></div>{% endif %}
+</div></section>{% include 'hotel/pie_reserva.html' %}
+{% endblock %}

@@ -1,0 +1,6 @@
+<div class="booking-steps"><ol class="container">
+  <li class="{% if paso == 1 %}current{% elif paso > 1 %}completed{% endif %}"><a href="{% url 'hotel:fechas' %}"><span>{% if paso > 1 %}✓{% else %}1{% endif %}</span>Fechas</a></li>
+  <li class="{% if paso == 2 %}current{% elif paso > 3 %}completed{% endif %}"><span>{% if paso > 3 %}✓{% else %}2{% endif %}</span>Habitación y extras</li>
+  <li class="{% if paso == 3 %}current{% elif paso > 3 %}completed{% endif %}"><span>{% if paso > 3 %}✓{% else %}3{% endif %}</span>Tu cuenta</li>
+  <li class="{% if paso == 4 %}current{% elif paso > 4 %}completed{% endif %}"><span>{% if paso > 4 %}✓{% else %}4{% endif %}</span>Datos y pago</li><li class="{% if paso == 5 %}current{% endif %}"><span>5</span>Confirmación</li>
+</ol></div>

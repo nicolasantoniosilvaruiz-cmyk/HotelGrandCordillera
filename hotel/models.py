@@ -4,10 +4,13 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import AbstractUser
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q, F
 from django.db.models.functions import Lower
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 from django.utils import timezone
 
 from .managers import UsuarioManager
@@ -279,6 +282,16 @@ class Reserva(models.Model):
 
     fecha_salida = models.DateTimeField()
 
+    numero_huespedes = models.PositiveSmallIntegerField(
+        default=1,
+        validators=[MinValueValidator(1), MaxValueValidator(6)],
+        verbose_name="Número de huéspedes",
+    )
+
+    pago_simulado = models.BooleanField(
+        default=False, editable=False, verbose_name="Pago de prueba aprobado",
+    )
+
     fecha_creacion = models.DateTimeField(
         default=timezone.now,
         editable=False,
@@ -385,6 +398,122 @@ class Reserva(models.Model):
             ),
         ]
 
+    @staticmethod
+    def contar_noches(entrada, salida):
+        if not entrada or not salida or salida <= entrada:
+            raise ValidationError({
+                "fecha_salida": "La salida debe ser posterior a la entrada.",
+            })
+        zona = timezone.get_default_timezone()
+        entrada_local = timezone.localtime(entrada, zona) if timezone.is_aware(entrada) else entrada
+        salida_local = timezone.localtime(salida, zona) if timezone.is_aware(salida) else salida
+        return max(1, (salida_local.date() - entrada_local.date()).days)
+
+    def clean(self):
+        super().clean()
+        if self.fecha_entrada and self.fecha_salida:
+            self.contar_noches(self.fecha_entrada, self.fecha_salida)
+
+    def calcular_total(self, *, using=None, valores=None):
+        valores = valores or {
+            campo: getattr(self, campo)
+            for campo in (
+                "fecha_entrada", "fecha_salida",
+                "precio_noche_pactado", "descuento_aplicado",
+            )
+        }
+        noches = self.contar_noches(valores["fecha_entrada"], valores["fecha_salida"])
+        servicios = Decimal("0")
+        if not self._state.adding:
+            detalles = DetalleReserva.objects.using(using or self._state.db or "default")
+            servicios = sum(
+                (cantidad * precio for cantidad, precio in detalles.filter(
+                    reserva_id=self.pk
+                ).values_list("cantidad", "precio_unitario")),
+                Decimal("0"),
+            )
+        subtotal = noches * valores["precio_noche_pactado"] + servicios
+        return max(Decimal("0"), subtotal - valores["descuento_aplicado"]).quantize(Decimal("0.01"))
+
+    def recalcular_total(self, *, using=None):
+        # Leer los valores guardados evita usar un objeto de reserva desactualizado.
+        using = using or self._state.db or "default"
+        actual = type(self).objects.using(using).get(pk=self.pk)
+        actual.save(using=using, update_fields=["monto_total"])
+        self.monto_total = actual.monto_total
+        return self.monto_total
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if not update_fields:
+                return
+
+        using = kwargs.get("using") or self._state.db or "default"
+        anterior = None
+        if not self._state.adding:
+            anterior = (
+                type(self).objects.using(using)
+                .filter(pk=self.pk)
+                .values(
+                    "cliente_id", "habitacion_id", "fecha_entrada", "fecha_salida",
+                    "precio_noche_pactado", "descuento_aplicado",
+                )
+                .first()
+            )
+
+        campos_actualizados = set()
+        guardar_cliente = update_fields is None or bool(
+            {"cliente", "cliente_id"} & update_fields
+        )
+        guardar_habitacion = update_fields is None or bool(
+            {"habitacion", "habitacion_id"} & update_fields
+        )
+
+        # Conservar los datos pactados, salvo que cambie la relación.
+        if guardar_cliente and self.cliente_id and (
+            anterior is None or anterior["cliente_id"] != self.cliente_id
+        ):
+            usuario = self.cliente.usuario
+            for campo, origen in (
+                ("titular_rut", "rut"),
+                ("titular_nombre", "nombre"),
+                ("titular_apellido", "apellido"),
+                ("titular_correo", "email"),
+                ("titular_telefono", "telefono"),
+            ):
+                setattr(self, campo, getattr(usuario, origen))
+                campos_actualizados.add(campo)
+
+        if guardar_habitacion and self.habitacion_id and (
+            anterior is None
+            or anterior["habitacion_id"] != self.habitacion_id
+        ):
+            self.precio_noche_pactado = self.habitacion.precio_base_noche
+            campos_actualizados.add("precio_noche_pactado")
+
+        # Un guardado parcial debe calcular con los valores que quedarán en la BD.
+        campos_calculo = (
+            "fecha_entrada", "fecha_salida",
+            "precio_noche_pactado", "descuento_aplicado",
+        )
+        valores = {}
+        for campo in campos_calculo:
+            if anterior is not None and update_fields is not None and campo not in (
+                update_fields | campos_actualizados
+            ):
+                valores[campo] = anterior[campo]
+            else:
+                valores[campo] = getattr(self, campo)
+        self.monto_total = self.calcular_total(using=using, valores=valores)
+        campos_actualizados.add("monto_total")
+
+        if update_fields is not None:
+            kwargs["update_fields"] = update_fields | campos_actualizados
+
+        return super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.codigo} - Habitación {self.habitacion.numero}"
 
@@ -438,6 +567,26 @@ class DetalleReserva(models.Model):
     @property
     def subtotal(self):
         return self.cantidad * self.precio_unitario
+
+    def save(self, *args, **kwargs):
+        if kwargs.get("update_fields") is not None and not kwargs["update_fields"]:
+            return
+        using = kwargs.get("using") or self._state.db or "default"
+        with transaction.atomic(using=using):
+            anterior_id = None
+            if not self._state.adding:
+                anterior_id = type(self).objects.using(using).filter(
+                    pk=self.pk
+                ).values_list("reserva_id", flat=True).first()
+            resultado = super().save(*args, **kwargs)
+            actual_id = type(self).objects.using(using).values_list(
+                "reserva_id", flat=True
+            ).get(pk=self.pk)
+            for reserva in Reserva.objects.using(using).filter(
+                pk__in={anterior_id, actual_id} - {None}
+            ):
+                reserva.recalcular_total(using=using)
+            return resultado
 
     def __str__(self):
         return f"{self.reserva.codigo} - {self.servicio.nombre}"
@@ -541,3 +690,11 @@ class BitacoraReserva(models.Model):
 
     def __str__(self):
         return f"{self.reserva.codigo} - {self.accion}"
+
+
+@receiver(post_delete, sender=DetalleReserva)
+def recalcular_total_al_eliminar_servicio(sender, instance, using, **kwargs):
+    # También cubre eliminaciones múltiples desde el administrador.
+    reserva = Reserva.objects.using(using).filter(pk=instance.reserva_id).first()
+    if reserva is not None:
+        reserva.recalcular_total(using=using)

@@ -1,0 +1,23 @@
+{% extends 'hotel/base.html' %}{% load static %}
+{% block title %}Elige tus fechas · Grand Cordillera{% endblock %}
+{% block content %}
+{% include 'hotel/pasos.html' %}
+<section class="booking-page"><div class="container">
+  <header class="booking-heading"><span class="eyebrow">RESERVA DIRECTA</span><h1>Elige cuándo comienza tu pausa.</h1><p>Selecciona tu entrada y salida. Te mostramos la disponibilidad para toda tu estadía.</p></header>
+  {% if errores %}<div class="form-errors" role="alert">{% for campo, mensajes in errores.items %}{% for mensaje in mensajes %}<p>{{ mensaje }}</p>{% endfor %}{% endfor %}</div>{% endif %}
+  <form action="{% url 'hotel:habitaciones' %}" method="get" id="form-fechas" data-today="{{ hoy|date:'Y-m-d' }}">
+    <div class="booking-form dates-toolbar">
+      <div class="booking-field"><label for="entrada">ENTRADA</label><input id="entrada" type="date" name="entrada" min="{{ hoy|date:'Y-m-d' }}" value="{{ datos.entrada|date:'Y-m-d' }}" required></div>
+      <div class="booking-field"><label for="salida">SALIDA</label><input id="salida" type="date" name="salida" min="{{ hoy|date:'Y-m-d' }}" value="{{ datos.salida|date:'Y-m-d' }}" required></div>
+      <div class="booking-field"><label for="huespedes">HUÉSPEDES</label><select id="huespedes" name="huespedes"><option value="1" {% if datos.huespedes == 1 %}selected{% endif %}>1 adulto · 1 habitación</option><option value="2" {% if datos.huespedes == 2 %}selected{% endif %}>2 adultos · 1 habitación</option><option value="3" {% if datos.huespedes == 3 %}selected{% endif %}>3 adultos · 1 habitación</option><option value="4" {% if datos.huespedes == 4 %}selected{% endif %}>4 adultos · 1 habitación</option><option value="5" {% if datos.huespedes == 5 %}selected{% endif %}>5 adultos · 1 habitación</option><option value="6" {% if datos.huespedes == 6 %}selected{% endif %}>6 adultos · 1 habitación</option></select></div>
+    </div>
+    <div class="dates-layout"><div class="calendar-panel">
+      <div class="calendar-navigation"><button type="button" class="square-button" id="mes-anterior" aria-label="Mes anterior">‹</button><span id="rango-calendario" class="range-pill" aria-live="polite"></span><button type="button" class="square-button" id="mes-siguiente" aria-label="Mes siguiente">›</button></div>
+      <div id="calendarios" class="calendar-months" aria-label="Calendario de entrada y salida"></div>
+      <p class="calendar-legend"><span>● Entrada y salida</span><span>▬ Noches de estadía</span><span>Fechas anteriores no disponibles</span></p>
+      <div class="calendar-actions"><button type="button" id="limpiar-fechas" class="text-button">Limpiar fechas</button><button type="submit" class="button">Aplicar fechas <span aria-hidden="true">✓</span></button></div>
+      <noscript><p>Puedes seleccionar las fechas en los campos superiores y pulsar Aplicar fechas.</p></noscript>
+    </div><aside class="date-inspiration"><img src="{% static 'hotel/img/llanquihue-hero.webp' %}" alt="Paisaje del sur de Chile junto al lago"><h2>Unos días para<br>volver a conectar.</h2><p id="detalle-fechas">Elige las fechas de tu próxima escapada.</p><div class="date-notice"><svg class="icon"><use href="#check"/></svg><div><strong>Fechas listas para buscar</strong><p>Aplica el rango y consulta las habitaciones disponibles y sus precios.</p></div></div></aside></div>
+  </form><p class="booking-help">¿Prefieres que te ayudemos? Consulta con la recepción del hotel.</p>
+</div></section>{% include 'hotel/pie_reserva.html' %}
+{% endblock %}

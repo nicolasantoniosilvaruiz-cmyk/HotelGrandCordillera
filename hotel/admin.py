@@ -169,9 +169,45 @@ class ReservaAdmin(admin.ModelAdmin):
         "cliente__usuario__email",
     )
     autocomplete_fields = ("cliente", "personal", "habitacion")
-    readonly_fields = ("codigo", "fecha_creacion")
+    readonly_fields = (
+        "codigo",
+        "fecha_creacion",
+        "precio_noche_pactado",
+        "monto_total",
+        "pago_simulado",
+    )
     inlines = (DetalleReservaInline,)
     date_hierarchy = "fecha_entrada"
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        # Los servicios del formulario se guardan después de la reserva.
+        form.instance.recalcular_total()
+
+    def get_readonly_fields(self, request, obj=None):
+        campos = list(super().get_readonly_fields(request, obj))
+        if request.method == "POST":
+            tiene_cliente = bool(request.POST.get("cliente"))
+        else:
+            tiene_cliente = obj is not None and obj.cliente_id is not None
+
+        if tiene_cliente:
+            campos.extend([
+                "titular_rut",
+                "titular_nombre",
+                "titular_apellido",
+                "titular_correo",
+                "titular_telefono",
+            ])
+        return campos
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        if db_field.name.startswith("titular_"):
+            kwargs["help_text"] = (
+                "Completar solo para invitados. Si seleccionas un cliente, "
+                "sus datos se copiarán automáticamente al guardar."
+            )
+        return super().formfield_for_dbfield(db_field, request, **kwargs)
 
 
 @admin.register(DetalleReserva)

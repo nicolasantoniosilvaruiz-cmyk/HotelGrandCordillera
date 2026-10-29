@@ -1,0 +1,40 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="es-CL">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#193e50">
+  <meta name="description" content="Grand Cordillera, hotel en Puerto Varas. Encuentra tu próxima escapada entre el lago y la cordillera.">
+  <title>{% block title %}Grand Cordillera · Hotel en Puerto Varas{% endblock %}</title>
+  <link rel="icon" href="{% static 'hotel/img/montana.svg' %}" type="image/svg+xml">
+  <link rel="stylesheet" href="{% static 'hotel/css/home.css' %}">
+  <script src="{% static 'hotel/js/home.js' %}" defer></script>
+  <link rel="stylesheet" href="{% static 'hotel/css/reservas.css' %}">
+  <script src="{% static 'hotel/js/reservas.js' %}" defer></script>
+  <link rel="stylesheet" href="{% static 'hotel/css/checkout.css' %}">
+  <script src="{% static 'hotel/js/checkout.js' %}" defer></script>
+  <link rel="stylesheet" href="{% static 'hotel/css/gestion.css' %}">
+  <script src="{% static 'hotel/js/gestion.js' %}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#contenido">Ir al contenido</a>
+  <svg class="svg-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="mountain" viewBox="0 0 48 44"><path d="M3 36 18 5l9 19 7-13 11 25M10 22l6-3 5 4 3-5M2 42h44"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="sparkle" viewBox="0 0 24 24"><path d="m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2L12 3Zm7-1v4m-2-2h4"/></symbol>
+    <symbol id="bell" viewBox="0 0 24 24"><path d="M3 18h18M5 16a7 7 0 0 1 14 0H5Zm5-12h4m-2 0v3M2 21h20"/></symbol>
+    <symbol id="wifi" viewBox="0 0 24 24"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0m-11 4a6 6 0 0 1 8 0m-4 4h.01"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path d="m9 3 3-1 3 2 4 1 1 4 2 3-2 3-1 4-4 1-3 2-3-2-4-1-1-4-2-3 2-3 1-4 4-2Zm-2 9 3 3 6-6"/></symbol>
+    <symbol id="close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+  </svg>
+  <header class="site-header"><div class="header-inner container">
+    <a class="brand" href="{% url 'hotel:home' %}" aria-label="Grand Cordillera, inicio"><svg class="brand-mark" aria-hidden="true"><use href="#mountain"/></svg><span><span class="brand-name">Grand Cordillera</span><span class="brand-subtitle">HOTEL · <span class="stars">★★★★</span></span></span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="navegacion">Menú <span>☰</span></button>
+    <nav id="navegacion" class="main-nav" aria-label="Navegación principal"><a href="{% url 'hotel:home' %}#el-hotel">El hotel</a><a href="{% url 'hotel:fechas' %}">Habitaciones</a><a href="{% url 'hotel:home' %}#experiencias">Experiencias</a><a class="nav-link {% if gestion_activa %}current-nav{% endif %}" href="{% url 'hotel:mis_reservas' %}" {% if gestion_activa %}aria-current="page"{% endif %}>Mi reserva</a></nav>
+    <div class="account-nav">{% if user.is_authenticated %}<a class="account-profile-link" href="{% url 'hotel:mis_reservas' %}">{{ user.nombre }} · Mi cuenta</a><form action="{% url 'hotel:salir' %}" method="post">{% csrf_token %}<button class="button button-small" type="submit">Cerrar sesión</button></form>{% else %}<a class="login-link" href="{% url 'hotel:ingresar' %}{% if gestion_activa %}?next={% url 'hotel:mis_reservas' %}{% endif %}">Iniciar sesión</a><a class="button button-small" href="{% url 'hotel:registro' %}">Registrarse · −5%</a>{% endif %}</div>
+  </div></header>
+  {% if messages %}<div class="messages container" role="status">{% for message in messages %}<p>{{ message }}</p>{% endfor %}</div>{% endif %}
+  <main id="contenido">{% block content %}{% endblock %}</main>
+  <dialog id="condiciones" class="modal"><button class="modal-close" type="button" data-close aria-label="Cerrar"><svg><use href="#close"/></svg></button><span class="eyebrow">BIENVENIDO AL SUR</span><h2>Tu primera escapada, con un 5% menos.</h2><p>Beneficio de bienvenida para clientes registrados en su primera reserva. Inicia sesión al realizar tu reserva para identificar tu cuenta.</p><p class="muted">Consulta con recepción las condiciones y la aplicación del beneficio antes de confirmar.</p><a class="button" href="{% url 'hotel:registro' %}">Crear mi cuenta <svg class="icon"><use href="#arrow"/></svg></a></dialog>
+</body>
+</html>
