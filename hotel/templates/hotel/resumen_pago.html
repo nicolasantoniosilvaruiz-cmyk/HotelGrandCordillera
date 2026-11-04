@@ -6,7 +6,7 @@
   <div class="summary-lines"><div><span>Alojamiento · {{ noches }} × ${{ reserva.precio_noche_pactado|floatformat:'-2g' }}</span><strong>${{ alojamiento|floatformat:'-2g' }}</strong></div>
   {% for detalle in detalles %}<div><span>{{ detalle.servicio.nombre }} × {{ detalle.cantidad }}</span><strong>${{ detalle.subtotal|floatformat:'-2g' }}</strong></div>{% endfor %}
   <div class="summary-subtotal"><span>Subtotal</span><strong>${{ subtotal|floatformat:'-2g' }}</strong></div>
-  {% if reserva.descuento_aplicado %}<div class="discount-line"><span>Bienvenida · 5% en alojamiento</span><strong>−${{ reserva.descuento_aplicado|floatformat:'-2g' }}</strong></div>{% endif %}</div>
+  {% if reserva.descuento_aplicado %}<div class="discount-line"><span>{% if cupon_aplicado %}Cupón · {{ cupon_aplicado.porcentaje|floatformat:'-2' }}% en alojamiento{% else %}Bienvenida · 5% en alojamiento{% endif %}</span><strong>−${{ reserva.descuento_aplicado|floatformat:'-2g' }}</strong></div>{% endif %}</div>
   <div class="summary-total"><strong>Total CLP</strong><strong>${{ reserva.monto_total|floatformat:'-2g' }}</strong></div>
   <p class="price-caption">Los extras mantienen su precio. Sin cargos reales en esta demostración.</p>
 </aside>

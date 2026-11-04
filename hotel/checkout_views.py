@@ -9,11 +9,13 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
+from django.views.decorators.http import require_POST
 
 from .models import Reserva
 from .reservas import (
     ErrorReserva, RetencionVencida, confirmar_pago, liberar_retencion,
     preparar_pago, revision_pago,
+    aplicar_cupon_reserva,
 )
 
 
@@ -55,6 +57,7 @@ def contexto_estadia(reserva):
         'reserva': reserva, 'noches': noches, 'detalles': detalles,
         'alojamiento': alojamiento, 'subtotal': subtotal,
         'limite_cancelacion': reserva.fecha_entrada - timedelta(hours=3),
+        'cupon_aplicado': reserva.cupones.filter(estado__in=['ACTIVO', 'USADO']).first(),
     }
 
 
@@ -122,6 +125,21 @@ def pago(request):
     contexto = contexto_estadia(reserva)
     contexto.update({'form': form, 'paso': 4, 'ahora': timezone.now()})
     return render(request, 'hotel/pago.html', contexto)
+
+
+@require_POST
+@never_cache
+def aplicar_cupon(request):
+    identificador = request.session.get('reserva_en_curso')
+    if not identificador:
+        return redirect('hotel:fechas')
+    try:
+        aplicar_cupon_reserva(identificador, request.user, request.POST.get('codigo_cupon',''))
+    except (ErrorReserva, Reserva.DoesNotExist) as error:
+        messages.error(request, str(error))
+    else:
+        messages.success(request, 'Descuento actualizado. Revisa el total antes de confirmar.')
+    return redirect('hotel:pago')
 
 
 def reserva_autorizada(request, codigo):

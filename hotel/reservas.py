@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import Cliente, DetalleReserva, Habitacion, Reserva, ServicioAdicional
+from .models import Cliente, CuponDescuento, DetalleReserva, Habitacion, Reserva, ServicioAdicional
 
 
 class ErrorReserva(Exception):
@@ -40,9 +40,12 @@ def actualizar_descuento(reserva):
     alojamiento = reserva.precio_noche_pactado * reserva.contar_noches(
         reserva.fecha_entrada, reserva.fecha_salida,
     )
+    cupones = reserva.cupones.filter(estado='ACTIVO')
+    cupones.exclude(cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).update(reserva=None)
+    cupon = cupones.filter(cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).order_by('pk').first() if reserva.cliente_id else None
+    porcentaje = cupon.porcentaje / Decimal('100') if cupon else (Decimal('0.05') if elegible else Decimal('0'))
     reserva.descuento_aplicado = (
-        (alojamiento * Decimal('0.05')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        if elegible else Decimal('0.00')
+        (alojamiento * porcentaje).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     )
     reserva.save(update_fields=['descuento_aplicado'])
 
@@ -135,7 +138,36 @@ def confirmar_pago(reserva_id, datos, revision):
     reserva.retencion_hasta = None
     reserva.pago_simulado = True
     reserva.save()
+    elegido = reserva.cupones.filter(estado='ACTIVO', cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).order_by('pk').first()
+    if elegido:
+        elegido.estado = 'USADO'
+        elegido.save(update_fields=['estado'])
+        reserva.cupones.filter(estado='ACTIVO').update(reserva=None)
     return reserva, None
+
+
+@transaction.atomic
+def aplicar_cupon_reserva(reserva_id, usuario, codigo):
+    reserva = Reserva.objects.select_related('cliente__usuario').get(pk=reserva_id)
+    if not usuario.is_authenticated or not reserva.cliente_id or reserva.cliente.usuario_id != usuario.pk:
+        raise ErrorReserva('Inicia sesión con la cuenta titular para utilizar un cupón.')
+    if reserva.estado != 'RETENIDA' or not reserva.retencion_hasta or reserva.retencion_hasta <= timezone.now():
+        raise RetencionVencida('Tu retención venció. Selecciona nuevamente una habitación.')
+    if not codigo.strip():
+        reserva.cupones.filter(estado='ACTIVO').update(reserva=None)
+    else:
+        cupon = CuponDescuento.objects.select_related('reserva').filter(codigo__iexact=codigo.strip(), cliente_id=reserva.cliente_id, estado='ACTIVO', fecha_vencimiento__gte=timezone.localdate()).first()
+        if not cupon:
+            raise ErrorReserva('El cupón no está disponible para tu cuenta o ya venció.')
+        if cupon.reserva_id and cupon.reserva_id != reserva.pk:
+            otra = cupon.reserva
+            if otra.estado == 'CONFIRMADA' or (otra.estado == 'RETENIDA' and otra.retencion_hasta and otra.retencion_hasta > timezone.now()):
+                raise ErrorReserva('El cupón ya está asociado a otra reserva en proceso.')
+        reserva.cupones.filter(estado='ACTIVO').exclude(pk=cupon.pk).update(reserva=None)
+        cupon.reserva = reserva
+        cupon.save(update_fields=['reserva'])
+    actualizar_descuento(reserva)
+    return reserva
 
 
 def liberar_retencion(reserva_id):

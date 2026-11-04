@@ -1,5 +1,6 @@
 import secrets
 import string
+import uuid
 from datetime import timedelta
 from decimal import Decimal
 
@@ -306,6 +307,8 @@ class Reserva(models.Model):
         null=True,
         blank=True,
     )
+
+    fecha_checkout = models.DateTimeField(null=True, blank=True)
 
     estado = models.CharField(
         max_length=12,
@@ -668,6 +671,8 @@ class BitacoraReserva(models.Model):
         Reserva,
         on_delete=models.PROTECT,
         related_name="eventos",
+        null=True,
+        blank=True,
     )
 
     personal = models.ForeignKey(
@@ -682,6 +687,11 @@ class BitacoraReserva(models.Model):
 
     motivo = models.TextField()
 
+    habitacion = models.ForeignKey(Habitacion, on_delete=models.PROTECT, null=True, blank=True)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT, null=True, blank=True)
+    datos_antes = models.JSONField(default=dict, blank=True)
+    datos_despues = models.JSONField(default=dict, blank=True)
+
     class Meta:
         db_table = "bitacora_reserva"
         verbose_name = "Registro de bitácora"
@@ -689,7 +699,55 @@ class BitacoraReserva(models.Model):
         ordering = ["-fecha"]
 
     def __str__(self):
-        return f"{self.reserva.codigo} - {self.accion}"
+        return f"{self.reserva.codigo if self.reserva_id else 'Hotel'} - {self.accion}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('Los registros de auditoría no se pueden modificar.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Los registros de auditoría no se pueden eliminar.')
+
+
+class CampanaPromocion(models.Model):
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    asunto = models.CharField(max_length=180)
+    mensaje = models.TextField()
+    porcentaje = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.01')), MaxValueValidator(100)])
+    fecha_vencimiento = models.DateField()
+    personal = models.ForeignKey(PersonalHotel, on_delete=models.PROTECT)
+    fecha = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-fecha']
+        verbose_name = 'Campaña de promoción'
+        verbose_name_plural = 'Campañas de promoción'
+
+    def __str__(self):
+        return self.asunto
+
+
+class EnvioPromocion(models.Model):
+    class Estado(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        ENVIANDO = 'ENVIANDO', 'En proceso'
+        ENVIADO = 'ENVIADO', 'Enviado'
+        ERROR = 'ERROR', 'Error de envío'
+
+    campana = models.ForeignKey(CampanaPromocion, on_delete=models.PROTECT, related_name='envios')
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT)
+    cupon = models.OneToOneField(CuponDescuento, on_delete=models.PROTECT)
+    destinatario = models.EmailField()
+    cuerpo = models.TextField()
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
+    fecha_envio = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True)
+    backend = models.CharField(max_length=150, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['campana', 'cliente'], name='promocion_destinatario_unico')]
+        ordering = ['pk']
 
 
 @receiver(post_delete, sender=DetalleReserva)

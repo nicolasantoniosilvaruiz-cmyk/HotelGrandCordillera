@@ -1,6 +1,8 @@
 from django.contrib import admin
+from django import forms
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.forms import UserCreationForm, UserChangeForm
+from .personal import auditar, instantanea, personal_de
 
 from .models import (
     Usuario,
@@ -105,6 +107,21 @@ class ClienteAdmin(admin.ModelAdmin):
 
 @admin.register(PersonalHotel)
 class PersonalHotelAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        previo = PersonalHotel.objects.filter(pk=obj.pk).values('usuario_id', 'codigo_empleado', 'rol').first() if change else {}
+        super().save_model(request, obj, form, change)
+        despues = {'usuario_id': obj.usuario_id, 'codigo_empleado': obj.codigo_empleado, 'rol': obj.rol}
+        if previo != despues:
+            auditar(personal_de(request.user), 'MODIFICAR_PERSONAL' if change else 'CREAR_PERSONAL', 'Asignación o modificación de perfil del personal desde Django Admin.', antes=previo or {}, despues=despues)
     list_display = ("codigo_empleado", "usuario", "rol")
     list_filter = ("rol",)
     search_fields = (
@@ -118,6 +135,20 @@ class PersonalHotelAdmin(admin.ModelAdmin):
 
 @admin.register(Habitacion)
 class HabitacionAdmin(admin.ModelAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        return ('estado_actual',) if obj is not None else ()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        anterior = Habitacion.objects.filter(pk=obj.pk).values('numero', 'tipo', 'precio_base_noche', 'estado_actual').first() if change else {}
+        super().save_model(request, obj, form, change)
+        antes = {k: str(v) for k,v in anterior.items()} if anterior else {}
+        despues = {k: str(getattr(obj,k)) for k in ('numero', 'tipo', 'precio_base_noche', 'estado_actual')}
+        perfil = personal_de(request.user)
+        if perfil and antes != despues:
+            auditar(perfil, 'MODIFICAR_HABITACION' if change else 'CREAR_HABITACION', 'Gestión de habitación desde el administrador de Django.', habitacion=obj, antes=antes, despues=despues)
     list_display = (
         "numero",
         "tipo",
@@ -131,6 +162,12 @@ class HabitacionAdmin(admin.ModelAdmin):
 
 @admin.register(ServicioAdicional)
 class ServicioAdicionalAdmin(admin.ModelAdmin):
+    def save_model(self, request, obj, form, change):
+        anterior = ServicioAdicional.objects.filter(pk=obj.pk).values('nombre', 'precio', 'activo').first() if change else {}
+        super().save_model(request, obj, form, change)
+        perfil = personal_de(request.user)
+        if perfil:
+            auditar(perfil, 'MODIFICAR_SERVICIO' if change else 'CREAR_SERVICIO', 'Gestión del catálogo de servicios desde Django Admin.', antes={k:str(v) for k,v in anterior.items()} if anterior else {}, despues={'servicio_id':obj.pk,'nombre':obj.nombre,'precio':str(obj.precio),'activo':obj.activo})
     list_display = ("nombre", "precio", "activo")
     list_filter = ("activo",)
     search_fields = ("nombre",)
@@ -148,8 +185,41 @@ class DetalleReservaInline(admin.TabularInline):
     )
 
 
+class ReservaAuditadaForm(forms.ModelForm):
+    motivo_operacion = forms.CharField(label='Motivo de la intervención', required=False, widget=forms.Textarea(attrs={'rows': 2}), help_text='Obligatorio al modificar una reserva existente. Se registra en auditoría.')
+
+    class Meta:
+        model = Reserva
+        fields = '__all__'
+
+    def clean(self):
+        datos = super().clean()
+        if self.instance.pk and not datos.get('motivo_operacion','').strip():
+            self.add_error('motivo_operacion', 'El motivo de la intervención es obligatorio.')
+        if not self.instance.pk and all(datos.get(c) for c in ('habitacion', 'fecha_entrada', 'fecha_salida')):
+            from .reservas import hay_conflicto
+            candidata = Reserva(habitacion=datos['habitacion'], fecha_entrada=datos['fecha_entrada'], fecha_salida=datos['fecha_salida'])
+            if datos['habitacion'].estado_actual == 'MANTENIMIENTO' or hay_conflicto(candidata):
+                self.add_error('habitacion', 'La habitación no está disponible para esas fechas.')
+        return datos
+
+
 @admin.register(Reserva)
 class ReservaAdmin(admin.ModelAdmin):
+    form = ReservaAuditadaForm
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        request._hotel_reserva_antes = instantanea(Reserva.objects.get(pk=obj.pk)) if change else {}
+        super().save_model(request, obj, form, change)
     list_display = (
         "codigo",
         "habitacion",
@@ -183,9 +253,15 @@ class ReservaAdmin(admin.ModelAdmin):
         super().save_related(request, form, formsets, change)
         # Los servicios del formulario se guardan después de la reserva.
         form.instance.recalcular_total()
+        antes = getattr(request, '_hotel_reserva_antes', {})
+        despues = instantanea(form.instance)
+        if antes != despues:
+            auditar(personal_de(request.user), 'MODIFICAR_RESERVA' if change else 'CREAR_RESERVA', form.cleaned_data.get('motivo_operacion') or 'Reserva creada desde el administrador de Django.', reserva=form.instance, antes=antes, despues=despues)
 
     def get_readonly_fields(self, request, obj=None):
         campos = list(super().get_readonly_fields(request, obj))
+        if obj is not None:
+            campos.extend(['estado', 'fecha_checkin', 'fecha_checkout', 'personal', 'habitacion', 'fecha_entrada', 'fecha_salida', 'numero_huespedes', 'descuento_aplicado'])
         if request.method == "POST":
             tiene_cliente = bool(request.POST.get("cliente"))
         else:
@@ -225,6 +301,18 @@ class DetalleReservaAdmin(admin.ModelAdmin):
 
 @admin.register(CuponDescuento)
 class CuponDescuentoAdmin(admin.ModelAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        if obj is not None and obj.estado == 'USADO':
+            return ('codigo', 'cliente', 'reserva', 'porcentaje', 'fecha_vencimiento', 'estado')
+        return ()
+
+    def save_model(self, request, obj, form, change):
+        anterior = CuponDescuento.objects.filter(pk=obj.pk).values('codigo', 'cliente_id', 'reserva_id', 'porcentaje', 'fecha_vencimiento', 'estado').first() if change else {}
+        super().save_model(request, obj, form, change)
+        perfil = personal_de(request.user)
+        if perfil:
+            despues = {k:str(getattr(obj,k)) for k in ('codigo', 'cliente_id', 'reserva_id', 'porcentaje', 'fecha_vencimiento', 'estado')}
+            auditar(perfil, 'MODIFICAR_CUPON' if change else 'CREAR_CUPON', 'Gestión de cupón desde Django Admin.', cliente=obj.cliente, reserva=obj.reserva, antes={k:str(v) for k,v in anterior.items()} if anterior else {}, despues=despues)
     list_display = (
         "codigo",
         "cliente",
@@ -248,6 +336,16 @@ class BitacoraReservaAdmin(admin.ModelAdmin):
     list_filter = ("accion", "fecha")
     search_fields = ("reserva__codigo", "motivo")
     autocomplete_fields = ("reserva", "personal")
+    readonly_fields = ('reserva', 'personal', 'fecha', 'accion', 'motivo', 'habitacion', 'cliente', 'datos_antes', 'datos_despues')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 admin.site.site_header = "Administración Hotel Grand Cordillera"

@@ -126,7 +126,7 @@ class TotalReservaTests(TestCase):
         respuesta = self.client.get(url)
         self.assertNotIn('monto_total', respuesta.context['adminform'].form.fields)
         datos.update({
-            'detalles-INITIAL_FORMS': '1', 'detalles-0-id': reserva.detalles.get().pk,
+            'motivo_operacion': 'Eliminar el servicio a solicitud del titular', 'detalles-INITIAL_FORMS': '1', 'detalles-0-id': reserva.detalles.get().pk,
             'detalles-0-reserva': reserva.pk, 'detalles-0-DELETE': 'on',
         })
         respuesta = self.client.post(url, datos)

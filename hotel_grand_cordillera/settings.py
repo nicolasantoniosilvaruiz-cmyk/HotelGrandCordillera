@@ -125,3 +125,16 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Correo de desarrollo: archivos locales por defecto; SMTP configurable para Mailpit.
+import os
+EMAIL_BACKEND = os.environ.get('HOTEL_EMAIL_BACKEND', 'django.core.mail.backends.filebased.EmailBackend')
+EMAIL_FILE_PATH = BASE_DIR / 'correos_prueba'
+DEFAULT_FROM_EMAIL = os.environ.get('HOTEL_FROM_EMAIL', 'reservas@grandcordillera.test')
+EMAIL_HOST = os.environ.get('HOTEL_EMAIL_HOST', '127.0.0.1')
+EMAIL_PORT = int(os.environ.get('HOTEL_EMAIL_PORT', '1025'))
+EMAIL_TIMEOUT = 5
+EMAIL_USE_TLS = os.environ.get('HOTEL_EMAIL_TLS', '0') == '1'
+EMAIL_HOST_USER = os.environ.get('HOTEL_EMAIL_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('HOTEL_EMAIL_PASSWORD', '')
