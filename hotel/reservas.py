@@ -1,4 +1,5 @@
 """Retención y confirmación local de reservas. No procesa cobros reales."""
+from functools import partial
 from datetime import datetime, time
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -7,6 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .comprobantes import enviar_confirmacion_reserva
 from .models import Cliente, CuponDescuento, DetalleReserva, Habitacion, Reserva, ServicioAdicional
 
 
@@ -15,6 +17,10 @@ class ErrorReserva(Exception):
 
 
 class RetencionVencida(ErrorReserva):
+    pass
+
+
+class ReservaDeOtraSesion(ErrorReserva):
     pass
 
 
@@ -29,23 +35,31 @@ def hay_conflicto(reserva):
     ).exists()
 
 
-def actualizar_descuento(reserva):
+PORCENTAJE_BIENVENIDA = 5
+
+
+def porcentaje_bienvenida(usuario_id, reserva_id=None):
+    if usuario_id is None:
+        return 0
     # Una reserva confirmada alguna vez consume el beneficio, aunque se cancele.
-    elegible = reserva.cliente_id and not Reserva.objects.filter(
-        cliente_id=reserva.cliente_id,
-    ).filter(
+    anteriores = Reserva.objects.filter(cliente__usuario_id=usuario_id).filter(
         Q(fecha_confirmacion__isnull=False)
         | Q(estado__in=[Reserva.Estado.CONFIRMADA, Reserva.Estado.EN_ESTADIA, Reserva.Estado.COMPLETADA])
-    ).exclude(pk=reserva.pk).exists()
+    ).exclude(pk=reserva_id)
+    return 0 if anteriores.exists() else PORCENTAJE_BIENVENIDA
+
+
+def actualizar_descuento(reserva):
     alojamiento = reserva.precio_noche_pactado * reserva.contar_noches(
         reserva.fecha_entrada, reserva.fecha_salida,
     )
     cupones = reserva.cupones.filter(estado='ACTIVO')
     cupones.exclude(cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).update(reserva=None)
     cupon = cupones.filter(cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).order_by('pk').first() if reserva.cliente_id else None
-    porcentaje = cupon.porcentaje / Decimal('100') if cupon else (Decimal('0.05') if elegible else Decimal('0'))
+    usuario_id = reserva.cliente.usuario_id if reserva.cliente_id else None
+    porcentaje = cupon.porcentaje if cupon else porcentaje_bienvenida(usuario_id, reserva.pk)
     reserva.descuento_aplicado = (
-        (alojamiento * porcentaje).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        (alojamiento * porcentaje / 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     )
     reserva.save(update_fields=['descuento_aplicado'])
 
@@ -56,6 +70,10 @@ def preparar_pago(seleccion, usuario=None, reserva_id=None):
     # la escritura se serializan para evitar dos retenciones del mismo cupo.
     reserva = Reserva.objects.select_related('habitacion', 'cliente__usuario').filter(pk=reserva_id).first() if reserva_id else None
     if reserva is not None:
+        usuario_id = usuario.pk if usuario is not None else None
+        titular_id = reserva.cliente.usuario_id if reserva.cliente_id else None
+        if titular_id != usuario_id and (titular_id is not None or reserva.estado == Reserva.Estado.CONFIRMADA):
+            raise ReservaDeOtraSesion('La reserva anterior pertenece a otra cuenta o se confirmó como invitado. Elige una habitación disponible para continuar con esta cuenta.')
         if reserva.estado == Reserva.Estado.CONFIRMADA:
             return reserva
         if reserva.estado != Reserva.Estado.RETENIDA or not reserva.retencion_hasta or reserva.retencion_hasta <= timezone.now():
@@ -80,6 +98,8 @@ def preparar_pago(seleccion, usuario=None, reserva_id=None):
     salida = timezone.make_aware(salida, timezone.get_default_timezone())
     if entrada <= timezone.now() or salida <= entrada or not 1 <= huespedes <= 6:
         raise ErrorReserva('Las fechas o la cantidad de huéspedes no son válidas.')
+    if huespedes > habitacion.capacidad:
+        raise ErrorReserva('La cantidad de huéspedes supera la capacidad de esta habitación.')
     if habitacion.estado_actual == Habitacion.Estado.MANTENIMIENTO:
         raise ErrorReserva('La habitación se encuentra en mantenimiento.')
     reserva = Reserva(
@@ -93,7 +113,7 @@ def preparar_pago(seleccion, usuario=None, reserva_id=None):
     extras = seleccion.get('extras', {})
     for identificador, cantidad in extras.items():
         try:
-            servicio = ServicioAdicional.objects.get(pk=identificador, activo=True)
+            servicio = ServicioAdicional.disponibles_para(habitacion.tipo).get(pk=identificador)
         except (ServicioAdicional.DoesNotExist, ValueError, TypeError):
             raise ErrorReserva('Uno de los extras ya no está disponible. Revisa tu selección.')
         if not isinstance(cantidad, int) or not 1 <= cantidad <= 99:
@@ -137,12 +157,15 @@ def confirmar_pago(reserva_id, datos, revision):
     reserva.fecha_confirmacion = timezone.now()
     reserva.retencion_hasta = None
     reserva.pago_simulado = True
+    reserva.monto_pagado_inicial = reserva.monto_total
+    reserva.correo_estado = Reserva.EstadoCorreo.PENDIENTE
     reserva.save()
     elegido = reserva.cupones.filter(estado='ACTIVO', cliente_id=reserva.cliente_id, fecha_vencimiento__gte=timezone.localdate()).order_by('pk').first()
     if elegido:
         elegido.estado = 'USADO'
         elegido.save(update_fields=['estado'])
         reserva.cupones.filter(estado='ACTIVO').update(reserva=None)
+    transaction.on_commit(partial(enviar_confirmacion_reserva, reserva), robust=True)
     return reserva, None
 
 

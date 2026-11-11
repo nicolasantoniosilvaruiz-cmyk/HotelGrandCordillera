@@ -71,6 +71,39 @@ class GestionReservasTests(TestCase):
         self.assertNotContains(respuesta, 'name="rut"')
         self.assertEqual(len(respuesta.context['reservas']), 2)
 
+    def test_historial_filtra_por_estado_solo_reservas_propias(self):
+        for codigo, cliente, estado in (
+            ('ESTADIA1', self.cliente_hotel, Reserva.Estado.EN_ESTADIA),
+            ('SALIDA01', self.cliente_hotel, Reserva.Estado.COMPLETADA),
+            ('CANCEL01', self.cliente_hotel, Reserva.Estado.CANCELADA),
+            ('CANCELOT', self.otro_cliente, Reserva.Estado.CANCELADA),
+        ):
+            Reserva.objects.create(
+                codigo=codigo, cliente=cliente, estado=estado, habitacion=self.habitacion,
+                fecha_entrada=self.entrada, fecha_salida=self.entrada + timedelta(days=2),
+            )
+        self.client.force_login(self.usuario)
+        url = reverse('hotel:mis_reservas')
+        for filtro, codigos in (
+            ('activas', {self.reserva.codigo, 'ESTADIA1'}),
+            ('completadas', {'SALIDA01'}),
+            ('canceladas', {'CANCEL01'}),
+            ('desconocido', {self.reserva.codigo, 'ESTADIA1', 'SALIDA01', 'CANCEL01'}),
+        ):
+            with self.subTest(filtro=filtro):
+                respuesta = self.client.get(url, {'estado': filtro})
+                self.assertEqual({r.codigo for r in respuesta.context['reservas']}, codigos)
+
+        detalle = self.client.get(url, {'estado': 'canceladas', 'reserva': 'CANCEL01'})
+        self.assertContains(detalle, '?estado=canceladas&amp;reserva=CANCEL01')
+        self.assertEqual(detalle.context['reserva'].codigo, 'CANCEL01')
+        ajena = self.client.get(url, {'estado': 'canceladas', 'reserva': 'CANCELOT'})
+        self.assertEqual(ajena.status_code, 404)
+        self.client.force_login(self.otro_usuario)
+        vacio = self.client.get(url, {'estado': 'completadas'})
+        self.assertContains(vacio, 'No hay reservas con este estado.')
+        self.assertNotContains(vacio, 'Todavía no tienes reservas')
+
     def test_sesion_sin_reservas_tiene_estado_vacio(self):
         self.client.force_login(self.otro_usuario)
         respuesta = self.client.get(reverse('hotel:mis_reservas'))

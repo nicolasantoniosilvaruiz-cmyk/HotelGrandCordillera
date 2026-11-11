@@ -1,0 +1,16 @@
+{% extends 'hotel/panel/base.html' %}
+{% block content %}
+<div class="page-heading"><div><h1>Disponibilidad de extras</h1><p>Activa o desactiva los extras que se pueden solicitar.</p></div></div>
+<section class="panel-card table-card"><div class="table-scroll"><table>
+  <thead><tr><th>Extra</th><th>Categoría</th><th>Habitación mínima</th><th>Precio</th><th>Disponibilidad</th><th>Acción</th></tr></thead>
+  <tbody>
+  {% for servicio in servicios %}
+    <tr><td>{{ servicio.nombre }}</td><td>{{ servicio.get_categoria_display }}</td><td>{{ servicio.get_tipo_minimo_display }}</td>
+      <td>${{ servicio.precio|floatformat:'-2g' }} CLP</td><td>{% if servicio.activo %}Disponible{% else %}Desactivado{% endif %}</td>
+      <td><form method="post" action="{% url 'hotel:panel_estado_extra' servicio.pk %}">{% csrf_token %}
+        <button type="submit" name="activo" value="{% if servicio.activo %}0{% else %}1{% endif %}" class="outline-button small">{% if servicio.activo %}Desactivar{% else %}Activar{% endif %}</button>
+      </form></td></tr>
+  {% empty %}<tr><td colspan="6" class="empty">Todavía no hay extras en el catálogo.</td></tr>{% endfor %}
+  </tbody>
+</table></div></section>
+{% endblock %}

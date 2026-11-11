@@ -15,6 +15,7 @@ from django.dispatch import receiver
 from django.utils import timezone
 
 from .managers import UsuarioManager
+from .validaciones import validar_arroba
 
 
 # =========================================================
@@ -49,7 +50,9 @@ class Usuario(AbstractUser):
 
     apellido = models.CharField(max_length=100)
 
-    email = models.EmailField(
+    email = models.CharField(
+        max_length=254,
+        validators=[validar_arroba],
         unique=True,
         verbose_name="Correo electrónico",
     )
@@ -160,13 +163,51 @@ class Habitacion(models.Model):
     class Tipo(models.TextChoices):
         NORMAL = "NORMAL", "Normal"
         MEDIANA = "MEDIANA", "Mediana"
-        GRANDE = "GRANDE", "Grande / Suite"
+        SUITE_MED = "SUITE_MED", "Suite Mediana"
+        GRANDE = "GRANDE", "Suite Grande"
 
     class Estado(models.TextChoices):
         DISPONIBLE = "DISPONIBLE", "Disponible"
         RESERVADA = "RESERVADA", "Reservada"
         OCUPADA = "OCUPADA", "Ocupada"
         MANTENIMIENTO = "MANTENIMIENTO", "En mantenimiento"
+
+    capacidad = models.PositiveIntegerField(default=2, validators=[MinValueValidator(1)])
+    cantidad_camas = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    tipo_cama = models.CharField(max_length=30, default="Matrimonial")
+    televisor = models.BooleanField(default=True)
+    bano_privado = models.BooleanField(default=True, verbose_name="Baño privado")
+    tina = models.BooleanField(default=False)
+    minibar = models.BooleanField(default=False)
+
+    CONFIGURACION = {
+        Tipo.NORMAL: (2, 1, "Matrimonial"),
+        Tipo.MEDIANA: (4, 2, "Matrimonial"),
+        Tipo.SUITE_MED: (2, 1, "King"),
+        Tipo.GRANDE: (4, 2, "King"),
+    }
+
+    @property
+    def nivel(self):
+        return self.Tipo.values.index(self.tipo)
+
+    @property
+    def equipamiento(self):
+        opciones = (
+            (self.televisor, "Televisor"),
+            (self.bano_privado, "Baño privado"),
+            (self.tina, "Tina"),
+            (self.minibar, "Minibar"),
+        )
+        return " · ".join(nombre for disponible, nombre in opciones if disponible)
+
+    def save(self, *args, **kwargs):
+        anterior = type(self).objects.filter(pk=self.pk).values_list("tipo", flat=True).first() if self.pk else None
+        if anterior != self.tipo:
+            self.capacidad, self.cantidad_camas, self.tipo_cama = self.CONFIGURACION[self.tipo]
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = set(kwargs["update_fields"]) | {"capacidad", "cantidad_camas", "tipo_cama"}
+        return super().save(*args, **kwargs)
 
     numero = models.PositiveIntegerField(
         unique=True,
@@ -208,6 +249,29 @@ class Habitacion(models.Model):
 
 
 class ServicioAdicional(models.Model):
+    class Categoria(models.TextChoices):
+        RESERVA = "RESERVA", "Extra de reserva"
+        OUTDOOR = "OUTDOOR", "Actividad outdoor"
+        PRODUCTO = "PRODUCTO", "Producto para la habitación"
+        SERVICIO = "SERVICIO", "Servicio a la habitación"
+
+    categoria = models.CharField(max_length=10, choices=Categoria.choices, default=Categoria.RESERVA)
+    tipo_minimo = models.CharField(
+        max_length=10, choices=Habitacion.Tipo.choices, default=Habitacion.Tipo.NORMAL,
+        verbose_name="Categoría mínima de habitación",
+    )
+
+    @property
+    def nivel_minimo(self):
+        return Habitacion.Tipo.values.index(self.tipo_minimo)
+
+    @classmethod
+    def disponibles_para(cls, tipo):
+        niveles = Habitacion.Tipo.values
+        if tipo not in niveles:
+            return cls.objects.none()
+        return cls.objects.filter(activo=True, tipo_minimo__in=niveles[:niveles.index(tipo) + 1])
+
     nombre = models.CharField(
         max_length=100,
         unique=True,
@@ -288,6 +352,28 @@ class Reserva(models.Model):
         validators=[MinValueValidator(1), MaxValueValidator(6)],
         verbose_name="Número de huéspedes",
     )
+
+    monto_pagado_inicial = models.DecimalField(max_digits=12, decimal_places=2, null=True, editable=False)
+    monto_pagado_adicional = models.DecimalField(max_digits=12, decimal_places=2, default=0, editable=False)
+
+    class EstadoCorreo(models.TextChoices):
+        SIN_REGISTRO = "SIN_REGISTRO", "Sin registro de envío"
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        ENVIANDO = "ENVIANDO", "Enviando"
+        ENVIADO = "ENVIADO", "Enviado"
+        ERROR = "ERROR", "Error de envío"
+
+    correo_estado = models.CharField(max_length=12, choices=EstadoCorreo.choices, default=EstadoCorreo.SIN_REGISTRO, editable=False)
+    correo_error = models.TextField(blank=True, editable=False)
+    correo_intento = models.DateTimeField(null=True, editable=False)
+    correo_enviado = models.DateTimeField(null=True, editable=False)
+    correo_contenido = models.TextField(blank=True, editable=False)
+
+    @property
+    def saldo_pendiente(self):
+        if self.estado == self.Estado.CANCELADA:
+            return Decimal("0")
+        return max(Decimal("0"), self.monto_total - (self.monto_pagado_inicial or Decimal("0")) - self.monto_pagado_adicional)
 
     pago_simulado = models.BooleanField(
         default=False, editable=False, verbose_name="Pago de prueba aprobado",
@@ -435,6 +521,12 @@ class Reserva(models.Model):
                 ).values_list("cantidad", "precio_unitario")),
                 Decimal("0"),
             )
+            solicitudes = SolicitudExtra.objects.using(using or self._state.db or "default").filter(
+                reserva_id=self.pk, estado=SolicitudExtra.Estado.CONFIRMADA,
+            )
+            servicios += sum((cantidad * precio for cantidad, precio in solicitudes.values_list(
+                "cantidad", "precio_unitario",
+            )), Decimal("0"))
         subtotal = noches * valores["precio_noche_pactado"] + servicios
         return max(Decimal("0"), subtotal - valores["descuento_aplicado"]).quantize(Decimal("0.01"))
 
@@ -511,6 +603,9 @@ class Reserva(models.Model):
                 valores[campo] = getattr(self, campo)
         self.monto_total = self.calcular_total(using=using, valores=valores)
         campos_actualizados.add("monto_total")
+        if self.pago_simulado and self.monto_pagado_inicial is None:
+            self.monto_pagado_inicial = self.monto_total
+            campos_actualizados.add("monto_pagado_inicial")
 
         if update_fields is not None:
             kwargs["update_fields"] = update_fields | campos_actualizados
@@ -593,6 +688,39 @@ class DetalleReserva(models.Model):
 
     def __str__(self):
         return f"{self.reserva.codigo} - {self.servicio.nombre}"
+
+
+class SolicitudExtra(models.Model):
+    class Estado(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        CONFIRMADA = "CONFIRMADA", "Confirmada"
+        RECHAZADA = "RECHAZADA", "Rechazada"
+
+    reserva = models.ForeignKey(Reserva, on_delete=models.CASCADE, related_name="solicitudes_extra")
+    servicio = models.ForeignKey(ServicioAdicional, on_delete=models.PROTECT)
+    categoria = models.CharField(max_length=10, choices=ServicioAdicional.Categoria.choices)
+    cantidad = models.PositiveIntegerField(validators=[MinValueValidator(1), MaxValueValidator(99)])
+    precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
+    token = models.UUIDField()
+    fecha = models.DateTimeField(default=timezone.now)
+    resuelta_en = models.DateTimeField(null=True, blank=True)
+    atendida_por = models.ForeignKey(PersonalHotel, on_delete=models.PROTECT, null=True, blank=True)
+    respuesta = models.CharField(max_length=250, blank=True)
+
+    class Meta:
+        ordering = ["-fecha", "-pk"]
+        constraints = [
+            models.UniqueConstraint(fields=["reserva", "token"], name="solicitud_extra_token_unico"),
+            models.CheckConstraint(
+                condition=Q(cantidad__gte=1, cantidad__lte=99, precio_unitario__gte=0),
+                name="solicitud_extra_valores_validos",
+            ),
+        ]
+
+    @property
+    def subtotal(self):
+        return self.cantidad * self.precio_unitario
 
 
 # =========================================================

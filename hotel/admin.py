@@ -136,7 +136,7 @@ class PersonalHotelAdmin(admin.ModelAdmin):
 @admin.register(Habitacion)
 class HabitacionAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
-        return ('estado_actual',) if obj is not None else ()
+        return ('estado_actual', 'capacidad', 'cantidad_camas', 'tipo_cama') if obj is not None else ('capacidad', 'cantidad_camas', 'tipo_cama')
 
     def has_delete_permission(self, request, obj=None):
         return False
@@ -152,6 +152,12 @@ class HabitacionAdmin(admin.ModelAdmin):
     list_display = (
         "numero",
         "tipo",
+        "capacidad",
+        "cantidad_camas",
+        "tipo_cama",
+        "televisor",
+        "bano_privado",
+        "tina",
         "precio_base_noche",
         "estado_actual",
     )
@@ -163,13 +169,13 @@ class HabitacionAdmin(admin.ModelAdmin):
 @admin.register(ServicioAdicional)
 class ServicioAdicionalAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
-        anterior = ServicioAdicional.objects.filter(pk=obj.pk).values('nombre', 'precio', 'activo').first() if change else {}
+        anterior = ServicioAdicional.objects.filter(pk=obj.pk).values('nombre', 'precio', 'activo', 'categoria', 'tipo_minimo').first() if change else {}
         super().save_model(request, obj, form, change)
         perfil = personal_de(request.user)
         if perfil:
-            auditar(perfil, 'MODIFICAR_SERVICIO' if change else 'CREAR_SERVICIO', 'Gestión del catálogo de servicios desde Django Admin.', antes={k:str(v) for k,v in anterior.items()} if anterior else {}, despues={'servicio_id':obj.pk,'nombre':obj.nombre,'precio':str(obj.precio),'activo':obj.activo})
-    list_display = ("nombre", "precio", "activo")
-    list_filter = ("activo",)
+            auditar(perfil, 'MODIFICAR_SERVICIO' if change else 'CREAR_SERVICIO', 'Gestión del catálogo de servicios desde Django Admin.', antes={k:str(v) for k,v in anterior.items()} if anterior else {}, despues={'servicio_id':obj.pk,'nombre':obj.nombre,'precio':str(obj.precio),'activo':obj.activo,'categoria':obj.categoria,'tipo_minimo':obj.tipo_minimo})
+    list_display = ("nombre", "categoria", "tipo_minimo", "precio", "activo")
+    list_filter = ("activo", "categoria", "tipo_minimo")
     search_fields = ("nombre",)
 
 

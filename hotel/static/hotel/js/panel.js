@@ -1,4 +1,43 @@
 document.addEventListener('DOMContentLoaded',()=>{
+  document.querySelectorAll('[data-recipient-action]').forEach(boton => {
+    const grupo = boton.closest('.recipients-field');
+    const casillas = grupo.querySelectorAll('input[type="checkbox"][name="clientes"]:enabled');
+    boton.disabled = casillas.length === 0;
+    boton.addEventListener('click', () => {
+      const marcar = boton.dataset.recipientAction === 'select';
+      casillas.forEach(casilla => { casilla.checked = marcar; });
+    });
+  });
+
+  const buscador = document.querySelector('[data-recipient-search]');
+  if (buscador) {
+    const grupo = buscador.closest('.recipients-field');
+    const normalizar = texto => texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const compactarRut = texto => texto.replace(/[.\s-]/g, '');
+    const filas = Array.from(grupo.querySelectorAll('[data-recipient-row]'), fila => {
+      const [nombre, rut = ''] = normalizar(fila.textContent).split(' · rut ');
+      return {fila, nombre, rut: compactarRut(rut)};
+    });
+    const sinResultados = grupo.querySelector('[data-recipient-empty]');
+
+    const filtrar = () => {
+      const consulta = normalizar(buscador.value);
+      const rut = compactarRut(consulta);
+      let coincidencias = 0;
+      filas.forEach(item => {
+        const coincide = item.nombre.includes(consulta) || (rut !== '' && item.rut.includes(rut));
+        item.fila.hidden = !coincide;
+        if (coincide) coincidencias += 1;
+      });
+      sinResultados.hidden = coincidencias > 0 || filas.length === 0;
+    };
+    buscador.addEventListener('input', filtrar);
+    buscador.addEventListener('keydown', evento => {
+      if (evento.key === 'Enter') evento.preventDefault();
+    });
+    filtrar();
+  }
+
   const dashboard=document.getElementById('dashboard-live');
   let esperando=false;
   async function actualizar(){

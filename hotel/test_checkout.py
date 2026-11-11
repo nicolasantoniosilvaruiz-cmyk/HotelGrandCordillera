@@ -1,14 +1,17 @@
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+from django.core import mail
 from django.db import OperationalError, connections
 from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import Cliente, DetalleReserva, Habitacion, Reserva, ServicioAdicional, Usuario
+from .comprobantes import enviar_confirmacion_reserva
 from .reservas import ErrorReserva, preparar_pago
 
 
@@ -41,7 +44,7 @@ class CheckoutTests(TestCase):
         datos.update({
             'titular_nombre': 'Invitada', 'titular_apellido': 'Sur',
             'titular_rut': '22222222-2', 'titular_correo': 'invitada@example.com',
-            'titular_telefono': '998765432', 'resultado_pago': 'APROBADO',
+            'titular_telefono_pais': '+56', 'titular_telefono_numero': '98765432', 'resultado_pago': 'APROBADO',
             'acepta_condiciones': 'on',
         })
         datos.update(extra)
@@ -86,18 +89,72 @@ class CheckoutTests(TestCase):
         self.assertEqual(reserva.estado, 'CONFIRMADA')
         self.assertRedirects(respuesta, reverse('hotel:confirmacion', args=[reserva.codigo]))
 
+    def test_pago_con_cuenta_no_reutiliza_confirmacion_del_invitado(self):
+        inicial = self.preparar(registrado=False)
+        confirmada = self.client.post(reverse('hotel:pago'), self.datos_pago(inicial))
+        self.assertEqual(confirmada.status_code, 302)
+        self.assertEqual(self.client.get(confirmada.url).status_code, 200)
+
+        self.client.force_login(self.usuario)
+        respuesta = self.client.get(reverse('hotel:pago'), follow=True)
+        self.assertContains(respuesta, 'se confirmó como invitado')
+        self.assertNotContains(respuesta, 'Nº 101')
+        self.assertEqual(self.client.get(confirmada.url).status_code, 404)
+        self.assertNotIn('reserva_en_curso', self.client.session)
+        self.assertIsNone(Reserva.objects.get().cliente_id)
+
+    def test_correo_fallido_se_registra_y_reintenta_sin_duplicar(self):
+        respuesta = self.preparar()
+        with patch('hotel.comprobantes.EmailMessage.send', side_effect=OSError('Mailpit apagado')):
+            with self.captureOnCommitCallbacks(execute=True):
+                self.client.post(reverse('hotel:pago'), self.datos_pago(respuesta))
+        reserva = Reserva.objects.get()
+        self.assertEqual(reserva.estado, 'CONFIRMADA')
+        self.assertEqual(reserva.correo_estado, 'ERROR')
+        self.assertIn('Mailpit apagado', reserva.correo_error)
+        self.assertTrue(enviar_confirmacion_reserva(reserva))
+        self.assertTrue(enviar_confirmacion_reserva(reserva))
+        reserva.refresh_from_db()
+        self.assertEqual(reserva.correo_estado, 'ENVIADO')
+        self.assertEqual(reserva.correo_error, '')
+        self.assertIsNotNone(reserva.correo_enviado)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_comprobante_admite_estadia_y_completada_solo_para_titular(self):
+        respuesta = self.preparar()
+        self.client.post(reverse('hotel:pago'), self.datos_pago(respuesta))
+        reserva = Reserva.objects.get()
+        for estado in ('EN_ESTADIA', 'COMPLETADA'):
+            reserva.estado = estado
+            reserva.save(update_fields=['estado'])
+            url = reverse('hotel:comprobante', args=[reserva.codigo])
+            self.assertContains(self.client.get(url), reserva.codigo)
+            self.assertEqual(Client().get(url).status_code, 404)
+
     def test_doble_envio_no_duplica_reserva_ni_servicios(self):
         respuesta = self.preparar()
         datos = self.datos_pago(respuesta)
-        primera = self.client.post(reverse('hotel:pago'), datos)
-        segunda = self.client.post(reverse('hotel:pago'), datos)
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            primera = self.client.post(reverse('hotel:pago'), datos)
+            segunda = self.client.post(reverse('hotel:pago'), datos)
         self.assertEqual(primera.url, segunda.url)
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(len(mail.outbox), 1)
+        reserva = Reserva.objects.get()
+        correo = mail.outbox[0]
+        self.assertEqual(correo.to, [self.usuario.email])
+        self.assertIn(reserva.codigo, correo.subject)
+        self.assertIn('Desayuno', correo.body)
+        self.assertIn('48,000.00 CLP', correo.body)
+        self.assertEqual(correo.attachments[0].filename, f'reserva-{reserva.codigo}.txt')
         self.assertEqual(Reserva.objects.count(), 1)
         self.assertEqual(DetalleReserva.objects.count(), 1)
 
     def test_pago_rechazado_y_formulario_incompleto_no_confirman(self):
         respuesta = self.preparar()
-        rechazo = self.client.post(reverse('hotel:pago'), self.datos_pago(respuesta, resultado_pago='RECHAZADO'))
+        with self.captureOnCommitCallbacks() as callbacks:
+            rechazo = self.client.post(reverse('hotel:pago'), self.datos_pago(respuesta, resultado_pago='RECHAZADO'))
+        self.assertEqual(callbacks, [])
         self.assertContains(rechazo, 'pago de prueba fue rechazado')
         invalido = self.client.post(reverse('hotel:pago'), self.datos_pago(respuesta, acepta_condiciones=''))
         self.assertEqual(invalido.status_code, 200)

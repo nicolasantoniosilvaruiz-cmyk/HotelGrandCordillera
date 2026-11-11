@@ -1,0 +1,21 @@
+{% if solicitudes_extra %}
+<section class="panel-card"><h2>Solicitudes del huésped</h2>
+  <ul class="activity-list">
+  {% for extra in solicitudes_extra %}
+    <li><strong>{{ extra.servicio.nombre }} × {{ extra.cantidad }}</strong>
+      <span>{{ extra.get_categoria_display }} · {{ extra.get_estado_display }} · ${{ extra.subtotal|floatformat:'-2g' }} CLP</span>
+      {% if extra.respuesta %}<p>{{ extra.respuesta }}</p>{% endif %}
+      {% if extra.estado == 'PENDIENTE' and reserva.estado == 'EN_ESTADIA' %}
+      <form class="panel-form" method="post" action="{% url 'hotel:panel_accion' reserva.pk %}">
+        {% csrf_token %}<input type="hidden" name="accion" value="resolver_extra">
+        <input type="hidden" name="solicitud_extra" value="{{ extra.pk }}">
+        <label>Mensaje para el huésped <input name="respuesta" maxlength="250" placeholder="Indica la entrega, el horario o el motivo"></label>
+        <div><button class="button small" type="submit" name="decision" value="confirmar">Confirmar y cargar</button>
+        <button class="outline-button small" type="submit" name="decision" value="rechazar">Rechazar</button></div>
+      </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}

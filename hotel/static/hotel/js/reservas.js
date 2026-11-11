@@ -62,14 +62,32 @@ document.addEventListener('DOMContentLoaded', () => {
   if (seleccion) {
     const moneda = centavos => new Intl.NumberFormat('es-CL',{style:'currency',currency:'CLP',maximumFractionDigits:2}).format(centavos/100);
     const centavos = valor => Math.round(Number(valor)*100);
+    const filtroExtras = document.getElementById('filtro-categoria-extra');
+    const listaExtras = document.getElementById('lista-extras');
     const guardados = JSON.parse(document.getElementById('extras-guardados').textContent);
     seleccion.querySelectorAll('[data-extra]').forEach(input=>{input.value=guardados[input.dataset.id]||0;});
     const actualizar = () => {
       const elegido = seleccion.querySelector('[name=habitacion]:checked'); if(!elegido)return;
+      let visibles = 0;
+      seleccion.querySelectorAll('[data-extra]').forEach(input => {
+        const fila = input.closest('.extra-option');
+        const disponible = Number(fila.dataset.nivelMinimo) <= Number(elegido.dataset.nivel);
+        const coincide = filtroExtras.value === 'TODOS' || fila.dataset.categoria === filtroExtras.value;
+        fila.hidden = !disponible || !coincide;
+        if (!fila.hidden) visibles += 1;
+        input.disabled = !disponible;
+        if (!disponible) input.value = 0;
+      });
+      const sinExtras = document.getElementById('sin-extras-habitacion');
+      sinExtras.hidden = visibles > 0;
       seleccion.querySelectorAll('.room-option').forEach(card=>{const active=card.contains(elegido);card.classList.toggle('selected',active);card.querySelector('.select-label').textContent=active?'✓ Seleccionada':'Seleccionar';});
       document.getElementById('resumen-habitacion').textContent=elegido.dataset.nombre;
-      let total=centavos(elegido.dataset.precio)*Number(seleccion.dataset.noches);
-      document.getElementById('resumen-alojamiento').textContent=moneda(total);
+      const alojamiento = centavos(elegido.dataset.precio) * Number(seleccion.dataset.noches);
+      const descuento = Math.round(alojamiento * Number(seleccion.dataset.bienvenida) / 100);
+      let total = alojamiento - descuento;
+      document.getElementById('resumen-alojamiento').textContent = moneda(alojamiento);
+      const bienvenida = document.getElementById('resumen-bienvenida');
+      if (bienvenida) bienvenida.textContent = moneda(-descuento);
       const extras=document.getElementById('resumen-extras');extras.replaceChildren();
       seleccion.querySelectorAll('[data-extra]').forEach(input=>{
         const cantidad=Number(input.value)||0; input.closest('.extra-option').classList.toggle('active',cantidad>0);
@@ -77,6 +95,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if(cantidad){const subtotal=cantidad*centavos(input.dataset.precio);total+=subtotal;const line=document.createElement('div');const nombre=document.createElement('span'),precio=document.createElement('strong');nombre.textContent=`${input.dataset.nombre} × ${cantidad}`;precio.textContent=moneda(subtotal);line.append(nombre,precio);extras.append(line);}
       });document.getElementById('resumen-total').textContent=moneda(total);
     };
-    seleccion.addEventListener('input',actualizar);seleccion.addEventListener('change',actualizar);actualizar();
+    const cambiarHabitacion = evento => {
+      if (evento.target.name === 'habitacion') {
+        seleccion.querySelectorAll('[data-extra]').forEach(input => { input.value = 0; });
+        listaExtras.scrollTop = 0;
+      }
+      if (evento.target === filtroExtras) listaExtras.scrollTop = 0;
+      actualizar();
+    };
+    seleccion.addEventListener('input', cambiarHabitacion);
+    seleccion.addEventListener('change', cambiarHabitacion);
+    actualizar();
   }
 });

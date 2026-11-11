@@ -11,9 +11,12 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 
+from .campos import TelefonoMovilField
+from .comprobantes import extras_facturados, texto_comprobante
 from .models import Reserva
+from .validaciones import validar_arroba, validar_rut
 from .reservas import (
-    ErrorReserva, RetencionVencida, confirmar_pago, liberar_retencion,
+    ErrorReserva, ReservaDeOtraSesion, RetencionVencida, confirmar_pago, liberar_retencion,
     preparar_pago, revision_pago,
     aplicar_cupon_reserva,
 )
@@ -22,9 +25,12 @@ from .reservas import (
 class PagoPruebaForm(forms.Form):
     titular_nombre = forms.CharField(label='Nombre', max_length=100)
     titular_apellido = forms.CharField(label='Apellidos', max_length=100)
-    titular_rut = forms.CharField(label='RUT', max_length=14)
-    titular_telefono = forms.CharField(label='Teléfono de contacto', max_length=25)
-    titular_correo = forms.EmailField(label='Correo de contacto')
+    titular_rut = forms.CharField(label='RUT', max_length=20)
+    titular_telefono = TelefonoMovilField(label='Teléfono de contacto')
+    titular_correo = forms.CharField(
+        label='Correo de contacto', max_length=254, validators=[validar_arroba],
+        widget=forms.TextInput(attrs={'inputmode': 'email', 'autocomplete': 'email'}),
+    )
     resultado_pago = forms.ChoiceField(label='Resultado del pago de prueba', choices=(
         ('APROBADO', 'Aprobar pago de prueba'),
         ('RECHAZADO', 'Simular pago rechazado'),
@@ -35,14 +41,17 @@ class PagoPruebaForm(forms.Form):
     def __init__(self, *args, reserva, **kwargs):
         super().__init__(*args, **kwargs)
         if reserva.cliente_id:
+            self.fields['titular_telefono'] = forms.CharField(
+                label='Teléfono de contacto', max_length=25, required=False,
+            )
             for campo in ('nombre', 'apellido', 'rut', 'telefono', 'correo'):
                 self.fields[f'titular_{campo}'].disabled = True
 
     def clean_titular_rut(self):
-        rut = self.cleaned_data['titular_rut'].strip().replace('.', '').replace(' ', '').upper()
-        if len(rut) > 12:
-            raise forms.ValidationError('Revisa el formato de tu RUT.')
-        return rut
+        rut = self.cleaned_data['titular_rut']
+        if self.fields['titular_rut'].disabled:
+            return rut
+        return validar_rut(rut)
 
     def clean_titular_correo(self):
         return self.cleaned_data['titular_correo'].strip().lower()
@@ -50,7 +59,7 @@ class PagoPruebaForm(forms.Form):
 
 def contexto_estadia(reserva):
     noches = reserva.contar_noches(reserva.fecha_entrada, reserva.fecha_salida)
-    detalles = list(reserva.detalles.select_related('servicio'))
+    detalles = extras_facturados(reserva)
     alojamiento = reserva.precio_noche_pactado * noches
     subtotal = alojamiento + sum(d.subtotal for d in detalles)
     return {
@@ -86,6 +95,10 @@ def pago(request):
     except RetencionVencida as error:
         liberar_retencion(reserva_id)
         request.session.pop('reserva_en_curso', None)
+        return volver_a_habitaciones(request, str(error))
+    except ReservaDeOtraSesion as error:
+        request.session.pop('reserva_en_curso', None)
+        request.session.pop('reserva_seleccion', None)
         return volver_a_habitaciones(request, str(error))
     except ErrorReserva as error:
         return volver_a_habitaciones(request, str(error))
@@ -143,17 +156,21 @@ def aplicar_cupon(request):
 
 
 def reserva_autorizada(request, codigo):
-    reserva = get_object_or_404(Reserva.objects.select_related('habitacion', 'cliente__usuario'), codigo=codigo, estado__in=[Reserva.Estado.CONFIRMADA, Reserva.Estado.CANCELADA])
-    propia = request.user.is_authenticated and reserva.cliente_id and reserva.cliente.usuario_id == request.user.pk
-    if not propia and codigo not in request.session.get('reservas_autorizadas', []):
-        raise Http404
+    reserva = get_object_or_404(Reserva.objects.select_related('habitacion', 'cliente__usuario'), codigo=codigo, estado__in=[Reserva.Estado.CONFIRMADA, Reserva.Estado.EN_ESTADIA, Reserva.Estado.COMPLETADA, Reserva.Estado.CANCELADA])
+    if request.user.is_authenticated:
+        if not reserva.cliente_id or reserva.cliente.usuario_id != request.user.pk:
+            raise Http404
+    elif codigo not in request.session.get('reservas_autorizadas', []):
+        from .gestion_views import consulta_publica_vigente
+        if not consulta_publica_vigente(request, reserva):
+            raise Http404
     return reserva
 
 
 @never_cache
 def confirmacion(request, codigo):
     reserva = reserva_autorizada(request, codigo)
-    if reserva.estado == Reserva.Estado.CANCELADA:
+    if reserva.estado != Reserva.Estado.CONFIRMADA:
         return redirect(reverse('hotel:mis_reservas') + '?' + urlencode({'reserva': codigo, 'codigo': codigo}))
     contexto = contexto_estadia(reserva)
     contexto['paso'] = 5
@@ -164,22 +181,7 @@ def confirmacion(request, codigo):
 def comprobante(request, codigo):
     reserva = reserva_autorizada(request, codigo)
     datos = contexto_estadia(reserva)
-    lineas = [
-        'HOTEL GRAND CORDILLERA', 'Comprobante de reserva', '',
-        f'Código: {reserva.codigo}', f'Estado: {reserva.get_estado_display()}',
-        f'Titular: {reserva.titular_nombre} {reserva.titular_apellido}',
-        f'RUT: {reserva.titular_rut}', f'Correo: {reserva.titular_correo}',
-        f'Habitación: {reserva.habitacion.numero} - {reserva.habitacion.get_tipo_display()}',
-        f'Huéspedes: {reserva.numero_huespedes}',
-        f'Entrada: {timezone.localtime(reserva.fecha_entrada):%d/%m/%Y %H:%M}',
-        f'Salida: {timezone.localtime(reserva.fecha_salida):%d/%m/%Y %H:%M}',
-        f'Alojamiento: ${datos["alojamiento"]:,.2f} CLP',
-    ]
-    lineas += [f'{d.servicio.nombre} x {d.cantidad}: ${d.subtotal:,.2f} CLP' for d in datos['detalles']]
-    lineas += [f'Descuento: ${reserva.descuento_aplicado:,.2f} CLP', f'Total: ${reserva.monto_total:,.2f} CLP']
-    if reserva.pago_simulado:
-        lineas += ['', 'PAGO DE PRUEBA APROBADO. No se realizó ningún cargo real.']
-    lineas += ['', 'Este comprobante no constituye una boleta o factura.']
-    respuesta = HttpResponse('\n'.join(lineas), content_type='text/plain; charset=utf-8')
+    texto = texto_comprobante(reserva, datos["alojamiento"], datos["detalles"])
+    respuesta = HttpResponse(texto, content_type='text/plain; charset=utf-8')
     respuesta['Content-Disposition'] = f'attachment; filename="reserva-{reserva.codigo}.txt"'
     return respuesta

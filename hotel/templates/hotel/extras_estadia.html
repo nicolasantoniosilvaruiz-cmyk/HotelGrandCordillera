@@ -1,0 +1,26 @@
+<section id="extras-estadia" class="managed-reservation stay-extras">
+  {% if reserva.estado == 'EN_ESTADIA' %}
+    <h2>Solicitar extras</h2>
+    <p class="muted">Las actividades de ejemplo se confirman al solicitarlas. Recepción confirma los productos y servicios.</p>
+    <div class="stay-extra-options">
+      {% for servicio, token in catalogo_extras %}
+        <form action="{% url 'hotel:solicitar_extra' reserva.codigo %}" method="post">
+          {% csrf_token %}
+          <input type="hidden" name="servicio" value="{{ servicio.pk }}">
+          <input type="hidden" name="token" value="{{ token }}">
+          <div><small>{{ servicio.get_categoria_display }}</small><strong>{{ servicio.nombre }}</strong><span>${{ servicio.precio|floatformat:'-2g' }} CLP por unidad</span></div>
+          <label>Unidades <input type="number" name="cantidad" min="1" max="99" value="1" required></label>
+          <button class="outline-button" type="submit">Solicitar</button>
+        </form>
+      {% empty %}<p>No hay extras disponibles para esta habitación.</p>{% endfor %}
+    </div>
+  {% endif %}
+  {% if solicitudes_extra %}
+    <h2>Tus solicitudes</h2>
+    <ul>{% for solicitud in solicitudes_extra %}
+      <li><strong>{{ solicitud.servicio.nombre }} × {{ solicitud.cantidad }}</strong> · {{ solicitud.get_estado_display }}
+        {% if solicitud.respuesta %}<p>{{ solicitud.respuesta }}</p>{% endif %}
+      </li>
+    {% endfor %}</ul>
+  {% endif %}
+</section>

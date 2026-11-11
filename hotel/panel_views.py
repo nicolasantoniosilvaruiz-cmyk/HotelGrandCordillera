@@ -5,6 +5,7 @@ from decimal import Decimal
 from django import forms
 from django.conf import settings
 from django.contrib import messages
+from django.core import signing
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import OperationalError
@@ -17,8 +18,9 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 
-from .models import BitacoraReserva, CampanaPromocion, Cliente, EnvioPromocion, Habitacion, Reserva
-from .personal import acceso_personal, cancelar_por_personal, cambiar_estado_habitacion, datos_dashboard, modificar_por_personal, registrar_checkin, registrar_checkout
+from .comprobantes import extras_facturados, enviar_confirmacion_reserva
+from .models import BitacoraReserva, CampanaPromocion, Cliente, EnvioPromocion, Habitacion, Reserva, ServicioAdicional, SolicitudExtra
+from .personal import acceso_personal, pagar_saldo_estadia, agregar_extra_estadia, cancelar_por_personal, cambiar_disponibilidad_extra, cambiar_estado_habitacion, datos_dashboard, modificar_por_personal, registrar_checkin, registrar_checkout, resolver_extra_estadia
 from .promociones import crear_campana, enviar_campana
 
 
@@ -52,7 +54,9 @@ def estado_dashboard(request):
 @acceso_personal()
 def reservas(request):
     q = request.GET.get('q', '').strip()
-    listado = Reserva.objects.select_related('habitacion', 'cliente__usuario')
+    listado = Reserva.objects.select_related('habitacion', 'cliente__usuario').annotate(
+        extras_pendientes=Count('solicitudes_extra', filter=Q(solicitudes_extra__estado=SolicitudExtra.Estado.PENDIENTE)),
+    )
     if q:
         rut = q.replace('.', '').replace(' ', '').upper()
         listado = listado.annotate(rut_busqueda=Replace(Upper('titular_rut'), Value('.'), Value(''))).filter(
@@ -76,24 +80,79 @@ class ModificarReservaForm(forms.Form):
     motivo = forms.CharField(label='Motivo de modificación', max_length=1000, widget=forms.Textarea(attrs={'rows': 3}))
 
 
+class ExtraEstadiaForm(forms.Form):
+    servicio = forms.ModelChoiceField(queryset=ServicioAdicional.objects.none(), label='Extra')
+    cantidad = forms.IntegerField(label='Unidades a agregar', min_value=1, max_value=99, initial=1)
+    solicitud = forms.UUIDField(widget=forms.HiddenInput)
+
+    def __init__(self, *args, reserva, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['servicio'].queryset = ServicioAdicional.disponibles_para(reserva.habitacion.tipo).order_by('nombre')
+
+
+class PagoSaldoForm(forms.Form):
+    importe = forms.DecimalField(min_value=0, max_digits=12, decimal_places=2)
+    confirmar = forms.BooleanField()
+    revision = forms.CharField()
+
+
+class ResolverExtraForm(forms.Form):
+    solicitud_extra = forms.IntegerField(min_value=1)
+    decision = forms.ChoiceField(choices=(('confirmar', 'Confirmar'), ('rechazar', 'Rechazar')))
+    respuesta = forms.CharField(max_length=250, required=False)
+
+
 @never_cache
 @acceso_personal()
 def detalle_reserva(request, pk):
     reserva = get_object_or_404(Reserva.objects.select_related('habitacion', 'cliente__usuario'), pk=pk)
     contexto = contexto_panel(request, 'reservas')
     contexto.update({'reserva': reserva, 'form': ModificarReservaForm(initial={campo: getattr(reserva, campo) for campo in ('habitacion', 'fecha_entrada', 'fecha_salida', 'numero_huespedes')}), 'hoy': timezone.localdate(), 'eventos': reserva.eventos.select_related('personal__usuario')[:10]})
+    contexto['revision_saldo'] = signing.dumps([reserva.pk, str(reserva.monto_total), str(reserva.monto_pagado_adicional)], salt='hotel.saldo')
+    contexto['extras'] = extras_facturados(reserva)
+    contexto['solicitudes_extra'] = reserva.solicitudes_extra.select_related('servicio')
+    if reserva.estado == Reserva.Estado.EN_ESTADIA:
+        contexto['extra_form'] = ExtraEstadiaForm(reserva=reserva, initial={'solicitud': uuid.uuid4()})
     return render(request, 'hotel/panel/reserva.html', contexto)
 
 
 @require_POST
 @acceso_personal()
 def accion_reserva(request, pk):
-    get_object_or_404(Reserva, pk=pk)
+    reserva = get_object_or_404(Reserva.objects.select_related('habitacion'), pk=pk)
     accion = request.POST.get('accion')
     try:
         if accion == 'checkin':
             _, cambio = registrar_checkin(pk, request.personal_hotel)
             mensaje = 'Check-in registrado. La habitación está ocupada.' if cambio else 'El check-in ya estaba registrado.'
+        elif accion == 'agregar_extra':
+            extra_form = ExtraEstadiaForm(request.POST, reserva=reserva)
+            if not extra_form.is_valid():
+                raise ValidationError('Selecciona un servicio disponible e ingresa entre 1 y 99 unidades.')
+            cambio = agregar_extra_estadia(pk, request.personal_hotel, extra_form.cleaned_data)
+            mensaje = 'Extra agregado al total de la estadía.' if cambio else 'Este extra ya fue registrado.'
+        elif accion == 'resolver_extra':
+            respuesta = ResolverExtraForm(request.POST)
+            if not respuesta.is_valid():
+                raise ValidationError('Revisa la solicitud y el mensaje para el huésped.')
+            cambio = resolver_extra_estadia(pk, request.personal_hotel, **{
+                'solicitud_id': respuesta.cleaned_data['solicitud_extra'],
+                'decision': respuesta.cleaned_data['decision'],
+                'respuesta': respuesta.cleaned_data['respuesta'],
+            })
+            mensaje = 'Solicitud actualizada.' if cambio else 'La solicitud ya fue atendida.'
+        elif accion == 'pagar_saldo':
+            form_pago = PagoSaldoForm(request.POST)
+            if not form_pago.is_valid():
+                raise ValidationError('Confirma el pago simulado del saldo mostrado.')
+            cambio = pagar_saldo_estadia(pk, request.personal_hotel, form_pago.cleaned_data['importe'], form_pago.cleaned_data['revision'])
+            mensaje = 'Pago adicional simulado registrado.' if cambio else 'La reserva ya está pagada.'
+        elif accion == 'correo_confirmacion':
+            enviado = enviar_confirmacion_reserva(reserva, request.personal_hotel)
+            reserva.refresh_from_db()
+            if not enviado:
+                raise ValidationError(f'Correo: {reserva.get_correo_estado_display()}. {reserva.correo_error}')
+            mensaje = 'Correo de confirmación enviado.'
         elif accion == 'checkout':
             _, cambio = registrar_checkout(pk, request.personal_hotel)
             mensaje = 'Salida registrada. La estadía está completada.' if cambio else 'La salida ya estaba registrada.'
@@ -115,6 +174,31 @@ def accion_reserva(request, pk):
     else:
         messages.success(request, mensaje)
     return redirect('hotel:panel_reserva', pk=pk)
+
+
+@never_cache
+@acceso_personal()
+def disponibilidad_extras(request):
+    contexto = contexto_panel(request, 'extras')
+    contexto['servicios'] = ServicioAdicional.objects.order_by('categoria', 'nombre')
+    return render(request, 'hotel/panel/extras.html', contexto)
+
+
+@require_POST
+@acceso_personal()
+def estado_extra(request, pk):
+    get_object_or_404(ServicioAdicional, pk=pk)
+    estado = request.POST.get('activo')
+    if estado not in ('1', '0'):
+        messages.error(request, 'Elige un estado válido.')
+    else:
+        try:
+            cambiar_disponibilidad_extra(pk, request.personal_hotel, estado == '1')
+        except OperationalError:
+            messages.error(request, 'El catálogo está siendo actualizado. Inténtalo nuevamente.')
+        else:
+            messages.success(request, 'Disponibilidad actualizada.')
+    return redirect('hotel:panel_extras')
 
 
 @require_POST
@@ -150,13 +234,18 @@ def clientes(request):
     return render(request, 'hotel/panel/clientes.html', contexto)
 
 
+class DestinatariosPromocionField(forms.ModelMultipleChoiceField):
+    def label_from_instance(self, cliente):
+        return f'{cliente.usuario.get_full_name()} · RUT {cliente.usuario.rut}'
+
+
 class PromocionForm(forms.Form):
     token = forms.UUIDField(widget=forms.HiddenInput)
     asunto = forms.CharField(max_length=180, label='Asunto del correo')
     mensaje = forms.CharField(label='Mensaje', widget=forms.Textarea(attrs={'rows': 4}), max_length=5000)
     porcentaje = forms.DecimalField(label='Descuento en alojamiento (%)', min_value=Decimal('0.01'), max_value=100, max_digits=5, decimal_places=2)
     fecha_vencimiento = forms.DateField(label='Vencimiento del cupón', widget=forms.DateInput(attrs={'type': 'date'}))
-    clientes = forms.ModelMultipleChoiceField(label='Destinatarios', queryset=Cliente.objects.filter(usuario__is_active=True).select_related('usuario'), widget=forms.CheckboxSelectMultiple)
+    clientes = DestinatariosPromocionField(label='Destinatarios', queryset=Cliente.objects.filter(usuario__is_active=True).select_related('usuario'), widget=forms.CheckboxSelectMultiple)
 
     def clean_fecha_vencimiento(self):
         valor = self.cleaned_data['fecha_vencimiento']
@@ -196,8 +285,9 @@ def campana(request, pk):
 @acceso_personal(solo_admin=True)
 def reintentar_campana(request, pk):
     objeto = get_object_or_404(CampanaPromocion,pk=pk)
-    enviar_campana(objeto, request.personal_hotel, reintentar=True)
-    messages.info(request, 'Se procesaron únicamente los envíos fallidos, conservando sus cupones.')
+    pendientes = request.POST.get('grupo') == 'pendientes'
+    enviar_campana(objeto, request.personal_hotel, reintentar=not pendientes)
+    messages.info(request, 'Se procesaron los envíos pendientes.' if pendientes else 'Se reintentaron los envíos fallidos.')
     return redirect('hotel:panel_campana', pk=pk)
 
 

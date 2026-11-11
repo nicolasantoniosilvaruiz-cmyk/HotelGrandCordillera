@@ -2,13 +2,14 @@ from functools import wraps
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
+from django.core import signing
 from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import BitacoraReserva, Habitacion, PersonalHotel, Reserva
+from .models import BitacoraReserva, DetalleReserva, Habitacion, PersonalHotel, Reserva, ServicioAdicional, SolicitudExtra
 from .reservas import hay_conflicto
 
 
@@ -45,7 +46,7 @@ def instantanea(reserva):
     for campo in ('fecha_entrada', 'fecha_salida', 'fecha_checkin', 'fecha_checkout', 'fecha_confirmacion'):
         fecha = getattr(reserva, campo)
         valores[campo] = fecha.isoformat() if fecha else None
-    for campo in ('precio_noche_pactado', 'monto_total', 'descuento_aplicado'):
+    for campo in ('precio_noche_pactado', 'monto_total', 'descuento_aplicado', 'monto_pagado_inicial', 'monto_pagado_adicional'):
         valores[campo] = str(getattr(reserva, campo))
     valores['extras'] = [{'servicio_id': d.servicio_id, 'cantidad': d.cantidad, 'precio_unitario': str(d.precio_unitario), 'observaciones': d.observaciones} for d in reserva.detalles.order_by('pk')]
     return valores
@@ -82,12 +83,110 @@ def registrar_checkin(reserva_id, personal):
 
 
 @transaction.atomic
+def agregar_extra_estadia(reserva_id, personal, datos):
+    reserva = Reserva.objects.get(pk=reserva_id)
+    solicitud = str(datos['solicitud'])
+    if reserva.eventos.filter(accion='AGREGAR_EXTRA', datos_despues__solicitud_extra=solicitud).exists():
+        return False
+    if reserva.estado != Reserva.Estado.EN_ESTADIA:
+        raise ValidationError('Solo se pueden agregar extras durante una estadía activa.')
+
+    servicio = ServicioAdicional.disponibles_para(reserva.habitacion.tipo).filter(pk=datos['servicio'].pk).first()
+    if servicio is None:
+        raise ValidationError('El servicio ya no está disponible.')
+
+    antes = instantanea(reserva)
+    detalle = DetalleReserva.objects.filter(reserva=reserva, servicio=servicio).first()
+    if detalle is None:
+        detalle = DetalleReserva(reserva=reserva, servicio=servicio, cantidad=0, precio_unitario=servicio.precio)
+    detalle.cantidad += datos['cantidad']
+    detalle.save()
+    reserva.refresh_from_db()
+
+    despues = instantanea(reserva)
+    despues['solicitud_extra'] = solicitud
+    motivo = f"{servicio.nombre} · {datos['cantidad']} unidad(es) solicitadas durante la estadía."
+    auditar(personal, 'AGREGAR_EXTRA', motivo, reserva=reserva, antes=antes, despues=despues)
+    return True
+
+
+@transaction.atomic
+def resolver_extra_estadia(reserva_id, personal, solicitud_id, decision, respuesta):
+    reserva = Reserva.objects.get(pk=reserva_id)
+    solicitud = reserva.solicitudes_extra.select_related('servicio').filter(pk=solicitud_id).first()
+    if solicitud is None:
+        raise ValidationError('La solicitud no pertenece a esta reserva.')
+    if solicitud.estado != SolicitudExtra.Estado.PENDIENTE:
+        return False
+    if reserva.estado != Reserva.Estado.EN_ESTADIA:
+        raise ValidationError('La estadía ya no está activa.')
+    if decision == 'confirmar' and not ServicioAdicional.disponibles_para(reserva.habitacion.tipo).filter(pk=solicitud.servicio_id).exists():
+        raise ValidationError('El extra ya no está disponible. Rechaza la solicitud o vuelve a habilitarlo.')
+
+    antes = {'solicitud_id': solicitud.pk, 'estado': solicitud.estado, 'monto_total': str(reserva.monto_total)}
+    solicitud.estado = SolicitudExtra.Estado.CONFIRMADA if decision == 'confirmar' else SolicitudExtra.Estado.RECHAZADA
+    solicitud.resuelta_en = timezone.now()
+    solicitud.atendida_por = personal
+    solicitud.respuesta = respuesta
+    solicitud.save(update_fields=['estado', 'resuelta_en', 'atendida_por', 'respuesta'])
+    reserva.recalcular_total()
+    despues = {'solicitud_id': solicitud.pk, 'estado': solicitud.estado, 'monto_total': str(reserva.monto_total)}
+    auditar(personal, 'RESOLVER_EXTRA', respuesta or solicitud.servicio.nombre, reserva=reserva, antes=antes, despues=despues)
+    return True
+
+
+@transaction.atomic
+def cambiar_disponibilidad_extra(servicio_id, personal, activo):
+    servicio = ServicioAdicional.objects.get(pk=servicio_id)
+    if servicio.activo != activo:
+        anterior = servicio.activo
+        servicio.activo = activo
+        servicio.save(update_fields=['activo'])
+        auditar(
+            personal, 'DISPONIBILIDAD_EXTRA', servicio.nombre,
+            antes={'servicio_id': servicio.pk, 'activo': anterior},
+            despues={'servicio_id': servicio.pk, 'activo': activo},
+        )
+
+
+@transaction.atomic
+def pagar_saldo_estadia(reserva_id, personal, importe, revision=None):
+    reserva = Reserva.objects.get(pk=reserva_id)
+    if reserva.estado != Reserva.Estado.EN_ESTADIA:
+        raise ValidationError('El pago adicional corresponde a una estadía activa.')
+    if reserva.solicitudes_extra.filter(estado=SolicitudExtra.Estado.PENDIENTE).exists():
+        raise ValidationError('Resuelve los extras pendientes antes de pagar.')
+    saldo = reserva.saldo_pendiente
+    if not saldo:
+        return False
+    if revision is not None:
+        try:
+            esperado = signing.loads(revision, salt='hotel.saldo', max_age=1800)
+        except signing.BadSignature:
+            raise ValidationError('Actualiza la página para revisar el saldo y confirmar el pago.')
+        actual = [reserva.pk, str(reserva.monto_total), str(reserva.monto_pagado_adicional)]
+        if esperado != actual:
+            raise ValidationError('El saldo cambió. Revisa el importe actualizado antes de confirmar.')
+    if importe != saldo:
+        raise ValidationError('El saldo cambió. Revisa el importe actualizado antes de confirmar.')
+    antes = instantanea(reserva)
+    reserva.monto_pagado_adicional += saldo
+    reserva.save(update_fields=['monto_pagado_adicional'])
+    auditar(personal, 'PAGO_ADICIONAL', f'Pago simulado de saldo por {saldo} CLP.', reserva=reserva, antes=antes, despues=instantanea(reserva))
+    return True
+
+
+@transaction.atomic
 def registrar_checkout(reserva_id, personal):
     reserva = Reserva.objects.select_related('habitacion').get(pk=reserva_id)
     if reserva.estado == Reserva.Estado.COMPLETADA:
         return reserva, False
     if reserva.estado != Reserva.Estado.EN_ESTADIA:
         raise ValidationError('Solo puedes registrar la salida de una reserva en estadía.')
+    if reserva.solicitudes_extra.filter(estado=SolicitudExtra.Estado.PENDIENTE).exists():
+        raise ValidationError('Confirma o rechaza las solicitudes de extras pendientes antes de registrar la salida.')
+    if reserva.saldo_pendiente:
+        raise ValidationError('Registra el pago simulado del saldo pendiente antes de completar el check-out.')
     antes = instantanea(reserva)
     reserva.estado, reserva.fecha_checkout, reserva.personal = Reserva.Estado.COMPLETADA, timezone.now(), personal
     reserva.save(update_fields=['estado', 'fecha_checkout', 'personal'])
@@ -125,6 +224,8 @@ def modificar_por_personal(reserva_id, personal, datos):
     proporcion = reserva.descuento_aplicado / base_anterior if base_anterior else Decimal('0')
     for campo in ('habitacion', 'fecha_entrada', 'fecha_salida', 'numero_huespedes'):
         setattr(reserva, campo, datos[campo])
+    if reserva.numero_huespedes > reserva.habitacion.capacidad:
+        raise ValidationError('La cantidad de huéspedes supera la capacidad de la habitación.')
     if reserva.fecha_salida <= reserva.fecha_entrada or timezone.localtime(reserva.fecha_entrada).date() < timezone.localdate():
         raise ValidationError('Revisa las fechas: la entrada no puede estar en un día pasado y la salida debe ser posterior.')
     if reserva.habitacion.estado_actual == Habitacion.Estado.MANTENIMIENTO or hay_conflicto(reserva):

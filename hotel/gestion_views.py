@@ -1,8 +1,10 @@
 """Consulta del titular y cancelación de sus reservas desde la web."""
+import uuid
 from datetime import timedelta
 
 from django import forms
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db import OperationalError, transaction
 from django.db.models import Case, IntegerField, Value, When
 from django.http import Http404
@@ -14,11 +16,23 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 
 from .checkout_views import contexto_estadia
-from .models import Reserva
+from .extras_estadia import SolicitarExtraForm, catalogo_estadia, solicitar_extra
+from .models import Reserva, SolicitudExtra
+from .validaciones import normalizar_rut, validar_rut
 
 
-def normalizar_rut(valor):
-    return (valor or '').strip().replace('.', '').replace(' ', '').upper()
+def rut_coincide(guardado, ingresado):
+    if not guardado:
+        return False
+    try:
+        guardado = validar_rut(guardado)
+    except forms.ValidationError:
+        # Las reservas anteriores pueden contener RUT de prueba.
+        return constant_time_compare(guardado, ingresado)
+    try:
+        return constant_time_compare(guardado, validar_rut(ingresado))
+    except forms.ValidationError:
+        return False
 
 
 def rut_reserva(reserva):
@@ -81,14 +95,30 @@ def texto_estado(reserva):
     return reserva.get_estado_display()
 
 
+FILTROS_HISTORIAL = {
+    'todas': ('Todas', ()),
+    'activas': ('Activas', (Reserva.Estado.CONFIRMADA, Reserva.Estado.EN_ESTADIA)),
+    'completadas': ('Completadas', (Reserva.Estado.COMPLETADA,)),
+    'canceladas': ('Canceladas', (Reserva.Estado.CANCELADA,)),
+}
+
+
 @never_cache
 def mis_reservas(request):
     reserva = None
     reservas = []
     consulta_realizada = False
     form = None
+    filtro = 'todas'
     if request.user.is_authenticated:
-        reservas = list(Reserva.objects.filter(cliente__usuario=request.user).select_related(
+        solicitado = request.GET.get('estado')
+        if solicitado in FILTROS_HISTORIAL:
+            filtro = solicitado
+        propias = Reserva.objects.filter(cliente__usuario=request.user)
+        estados = FILTROS_HISTORIAL[filtro][1]
+        if estados:
+            propias = propias.filter(estado__in=estados)
+        reservas = list(propias.select_related(
             'habitacion', 'cliente__usuario',
         ).annotate(prioridad=Case(
             When(estado=Reserva.Estado.CONFIRMADA, then=Value(0)),
@@ -112,7 +142,7 @@ def mis_reservas(request):
                 candidata = Reserva.objects.select_related('habitacion', 'cliente__usuario').filter(
                     codigo__iexact=form.cleaned_data['codigo'],
                 ).first()
-                if candidata and rut_reserva(candidata) and constant_time_compare(
+                if candidata and rut_coincide(
                     rut_reserva(candidata), form.cleaned_data['rut'],
                 ):
                     reserva = candidata
@@ -135,6 +165,8 @@ def mis_reservas(request):
     contexto = {
         'consulta_form': form, 'reservas': reservas, 'consulta_realizada': consulta_realizada,
         'gestion_activa': True, 'consulta_hora': timezone.now(),
+        'filtro_historial': filtro,
+        'filtros_historial': [(clave, datos[0]) for clave, datos in FILTROS_HISTORIAL.items()],
     }
     if reserva is not None:
         contexto.update(contexto_estadia(reserva))
@@ -143,7 +175,37 @@ def mis_reservas(request):
             'puede_cancelar': puede_cancelar(reserva),
             'cancelar_form': CancelarReservaForm(),
         })
+        if reserva.estado == Reserva.Estado.EN_ESTADIA:
+            contexto['catalogo_extras'] = [(servicio, uuid.uuid4()) for servicio in catalogo_estadia(reserva)]
+        contexto['solicitudes_extra'] = reserva.solicitudes_extra.select_related('servicio')
     return render(request, 'hotel/mis_reservas.html', contexto)
+
+
+@require_POST
+@never_cache
+def solicitar_extra_reserva(request, codigo):
+    try:
+        with transaction.atomic():
+            reserva = get_object_or_404(Reserva.objects.select_related('cliente__usuario'), codigo=codigo)
+            if not tiene_acceso(request, reserva):
+                raise Http404
+            form = SolicitarExtraForm(request.POST)
+            if not form.is_valid():
+                raise ValidationError('Revisa el extra y la cantidad solicitada (entre 1 y 99).')
+            solicitud = solicitar_extra(reserva.pk, form.cleaned_data)
+    except ValidationError as error:
+        messages.error(request, ' '.join(error.messages))
+    except OperationalError:
+        messages.error(request, 'La reserva está siendo actualizada. Inténtalo nuevamente.')
+    else:
+        if solicitud.estado == SolicitudExtra.Estado.CONFIRMADA:
+            messages.success(request, 'Extra confirmado y agregado al total de la estadía.')
+        else:
+            messages.info(request, f'Solicitud de extra: {solicitud.get_estado_display().lower()}.')
+    destino = reverse('hotel:mis_reservas')
+    if request.user.is_authenticated:
+        destino += '?reserva=' + codigo
+    return redirect(destino + '#extras-estadia')
 
 
 @require_POST

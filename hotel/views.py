@@ -13,8 +13,10 @@ from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
+from .campos import TelefonoMovilField
 from .models import Cliente, Habitacion, Reserva, ServicioAdicional, Usuario
-from .reservas import liberar_retencion
+from .validaciones import validar_arroba, validar_rut
+from .reservas import liberar_retencion, porcentaje_bienvenida
 
 
 class BusquedaDisponibilidadForm(forms.Form):
@@ -57,7 +59,8 @@ def home(request):
     descripciones = {
         'NORMAL': 'Un espacio acogedor para hacer una pausa y disfrutar del sur.',
         'MEDIANA': 'Más espacio para descansar a tu ritmo y compartir la escapada.',
-        'GRANDE': 'La comodidad de una suite para una estadía especial.',
+        'SUITE_MED': 'Una cama king y comodidad para una escapada en pareja.',
+        'GRANDE': 'Dos camas king y espacio para compartir una estadía especial.',
     }
     for tipo, nombre in Habitacion.Tipo.choices:
         opciones = habitaciones.filter(tipo=tipo).order_by('precio_base_noche')
@@ -77,6 +80,12 @@ def home(request):
 
 
 class RegistroForm(UserCreationForm):
+    email = forms.CharField(
+        label='Correo electrónico', max_length=254, validators=[validar_arroba],
+        widget=forms.TextInput(attrs={'inputmode': 'email', 'autocomplete': 'email'}),
+    )
+    rut = forms.CharField(label='RUT', max_length=20)
+    telefono = TelefonoMovilField(label='Teléfono móvil')
     acepta_condiciones = forms.BooleanField(label='Acepto los términos y condiciones y la política de privacidad.')
 
     class Meta:
@@ -90,8 +99,8 @@ class RegistroForm(UserCreationForm):
         return email
 
     def clean_rut(self):
-        rut = self.cleaned_data['rut'].strip().replace('.', '').replace(' ', '').upper()
-        if Usuario.objects.filter(rut=rut).exists():
+        rut = validar_rut(self.cleaned_data['rut'])
+        if Usuario.objects.filter(rut__in=(rut, rut.replace('-', ''))).exists():
             raise forms.ValidationError('Ya existe una cuenta con este RUT.')
         return rut
 
@@ -116,7 +125,7 @@ def registro(request):
     })
 
 
-def habitaciones_disponibles(entrada, salida, reserva_propia=None):
+def habitaciones_disponibles(entrada, salida, reserva_propia=None, huespedes=None):
     bloqueos = Reserva.objects.filter(
         fecha_entrada__date__lt=salida, fecha_salida__date__gt=entrada,
     ).filter(
@@ -124,10 +133,13 @@ def habitaciones_disponibles(entrada, salida, reserva_propia=None):
         | Q(estado=Reserva.Estado.RETENIDA, retencion_hasta__gt=timezone.now())
     )
     if reserva_propia:
-        bloqueos = bloqueos.exclude(pk=reserva_propia)
-    return Habitacion.objects.exclude(
+        bloqueos = bloqueos.exclude(pk=reserva_propia, estado=Reserva.Estado.RETENIDA)
+    habitaciones = Habitacion.objects.exclude(
         estado_actual=Habitacion.Estado.MANTENIMIENTO,
     ).exclude(pk__in=bloqueos.values('habitacion_id')).order_by('tipo', 'numero')
+    if huespedes is not None:
+        habitaciones = habitaciones.filter(capacidad__gte=huespedes)
+    return habitaciones
 
 
 def fechas(request):
@@ -155,7 +167,7 @@ def habitaciones(request):
     if not form.is_valid():
         return redirect(reverse('hotel:fechas') + '?' + request.GET.urlencode())
     datos = form.cleaned_data
-    opciones = list(habitaciones_disponibles(datos['entrada'], datos['salida'], request.session.get('reserva_en_curso')))
+    opciones = list(habitaciones_disponibles(datos['entrada'], datos['salida'], request.session.get('reserva_en_curso'), datos['huespedes']))
     orden_tipos = {tipo: indice for indice, (tipo, _) in enumerate(Habitacion.Tipo.choices)}
     opciones.sort(key=lambda h: (orden_tipos[h.tipo], h.numero))
     borrador = request.session.get('seleccion_estadia', {})
@@ -170,6 +182,7 @@ def habitaciones(request):
         'habitaciones': opciones, 'seleccionada': seleccionado or (opciones[0] if opciones else None),
         'servicios': ServicioAdicional.objects.filter(activo=True),
         'extras_guardados': borrador.get('extras', {}) if mismo_rango else {},
+        'porcentaje_bienvenida': porcentaje_bienvenida(request.user.pk),
         'query': request.GET.urlencode(),
     })
 
@@ -182,7 +195,7 @@ def seleccionar_estadia(request):
         return redirect('hotel:fechas')
     datos = form.cleaned_data
     identificador = request.POST.get('habitacion', '')
-    habitacion = habitaciones_disponibles(datos['entrada'], datos['salida'], request.session.get('reserva_en_curso')).filter(pk=identificador if identificador.isdigit() else None).first()
+    habitacion = habitaciones_disponibles(datos['entrada'], datos['salida'], request.session.get('reserva_en_curso'), datos['huespedes']).filter(pk=identificador if identificador.isdigit() else None).first()
     consulta = urlencode({k: v.isoformat() if hasattr(v, 'isoformat') else v for k, v in datos.items()})
     if habitacion is None:
         messages.error(request, 'Esa habitación ya no está disponible. Elige otra opción.')
@@ -194,6 +207,9 @@ def seleccionar_estadia(request):
             messages.error(request, 'La cantidad de cada extra debe estar entre 0 y 99.')
             return redirect(reverse('hotel:habitaciones') + '?' + consulta)
         if int(cantidad):
+            if servicio.nivel_minimo > habitacion.nivel:
+                messages.error(request, 'Uno de los extras no corresponde a esta habitación. Vuelve a elegirlo.')
+                return redirect(reverse('hotel:habitaciones') + '?' + consulta)
             extras[str(servicio.pk)] = int(cantidad)
     seleccion = {
         'entrada': datos['entrada'].isoformat(), 'salida': datos['salida'].isoformat(),

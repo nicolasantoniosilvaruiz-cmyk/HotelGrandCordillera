@@ -58,7 +58,7 @@ class HomeTests(TestCase):
     def test_registro_crea_cliente_y_sesion_sin_permisos_administrativos(self):
         respuesta = self.client.post(reverse('hotel:registro'), {
             'nombre': 'Ana', 'apellido': 'Perez', 'rut': '11111111-1',
-            'email': 'ana@example.com', 'telefono': '912345678',
+            'email': 'ana@example.com', 'telefono_pais': '+56', 'telefono_numero': '12345678',
             'password1': 'Escapada-Sur-2864!', 'password2': 'Escapada-Sur-2864!', 'acepta_condiciones': 'on',
         })
         self.assertRedirects(respuesta, reverse('hotel:fechas'))
